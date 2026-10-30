@@ -127,7 +127,8 @@ class Scanner:
         envs = [p["environment"]["name"] for p in self.gh.get(f"{base}/pending_deployments")]
 
         approvers = {a["user"]["login"] for a in self.gh.get(f"{base}/approvals") if a["state"] == "approved"}
-        for pr in self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/pulls"):
+        prs = self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/pulls")
+        for pr in prs:
             approvers |= self.comment_approvers(repo, pr["number"], APPROVE_DEPLOY, started)
 
         break_glass = [
@@ -139,7 +140,13 @@ class Scanner:
         other_runs = [r["conclusion"] or r["status"]
                       for r in self.gh.paginate(f"/repos/{self.org}/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
                       if r["id"] != run["id"]]
-        check = self.our_check(repo, sha) if self.app_slug else None
+        # Merging creates a new commit, so the merge check sits on the PR's head commit.
+        check = None
+        if self.app_slug:
+            for candidate in [sha, *(pr["head"]["sha"] for pr in prs)]:
+                check = self.our_check(repo, candidate)
+                if check:
+                    break
 
         f = self.facts(repo, actor=run["triggering_actor"]["login"], sha=sha, branch=run["head_branch"],
                        approvers=approvers, workflows=[w["path"] for w in run.get("referenced_workflows", [])],
