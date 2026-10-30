@@ -21,7 +21,8 @@ class GitHub:
             },
         )
         with urllib.request.urlopen(req) as resp:
-            return json.load(resp), resp.headers.get("Link", "")
+            body = resp.read()
+            return (json.loads(body) if body else None), resp.headers.get("Link", "")
 
     def get(self, path: str):
         return self.request("GET", path)[0]
