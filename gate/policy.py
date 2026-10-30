@@ -30,6 +30,8 @@ class Facts:
     checks: dict[str, str] = field(default_factory=dict)  # check name -> conclusion
     other_runs: list[str] = field(default_factory=list)  # conclusions of other workflow runs on the commit
     break_glass: list["BreakGlass"] = field(default_factory=list)
+    # "signer_workflow|predicate_type" -> predicate of a verified attestation, or None
+    attestations: dict[str, dict | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -114,7 +116,22 @@ def _deploy_window(f: Facts, p: dict, members: Members) -> str | None:
     return None
 
 
+def attestation_key(p: dict) -> str:
+    return f"{p['signer_workflow']}|{p['predicate_type']}"
+
+
+def _attested(f: Facts, p: dict, members: Members) -> str | None:
+    predicate = f.attestations.get(attestation_key(p))
+    if predicate is None:
+        return f"No attestation for {f.sha[:7]} signed by {p['signer_workflow']}"
+    wrong = [k for k, v in p.get("require", {}).items() if predicate.get(k) != v]
+    if wrong:
+        return f"Attestation for {f.sha[:7]} does not show " + ", ".join(f"{k}={p['require'][k]}" for k in wrong)
+    return None
+
+
 RULES = {
+    "attested": _attested,
     "approvals": _approvals,
     "approvals_if_changed": _approvals_if_changed,
     "manifest_active": _manifest_active,

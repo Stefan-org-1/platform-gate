@@ -123,5 +123,23 @@ class Deploy(unittest.TestCase):
         self.assertFalse(evaluate(self.sets, f, members, BREAK_GLASS).passed)
 
 
+class Attested(unittest.TestCase):
+    params = {"signer_workflow": "Stefan-org-1/ci-templates/.github/workflows/node-build.yml",
+              "predicate_type": "https://example.com/scan/v1", "require": {"secret_scan": "pass"}}
+    sets = [RuleSet("scanned", [{"attested": params}])]
+    key = f"{params['signer_workflow']}|{params['predicate_type']}"
+
+    def test_missing_attestation_fails(self):
+        self.assertFalse(evaluate(self.sets, facts(), members).passed)
+
+    def test_passing_attestation_passes(self):
+        f = facts(attestations={self.key: {"secret_scan": "pass"}})
+        self.assertTrue(evaluate(self.sets, f, members).passed)
+
+    def test_failing_predicate_fails(self):
+        f = facts(attestations={self.key: {"secret_scan": "fail"}})
+        self.assertFalse(evaluate(self.sets, f, members).passed)
+
+
 if __name__ == "__main__":
     unittest.main()

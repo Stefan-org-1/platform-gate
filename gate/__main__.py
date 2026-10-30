@@ -6,7 +6,11 @@ approve or reject through the custom deployment protection rule.
 
 import argparse
 import base64
+import json
+import os
 import pathlib
+import subprocess
+import tempfile
 import urllib.error
 from datetime import datetime, timezone
 from functools import cache
@@ -14,7 +18,8 @@ from functools import cache
 import yaml
 
 from .github import GitHub
-from .policy import APPROVE_BREAK_GLASS, APPROVE_DEPLOY, BreakGlass, Facts, RuleSet, current_approvers, evaluate
+from .policy import (APPROVE_BREAK_GLASS, APPROVE_DEPLOY, BreakGlass, Facts, RuleSet, attestation_key,
+                     current_approvers, evaluate)
 
 CHECK_NAME = "policy"
 
@@ -72,6 +77,25 @@ class Config:
         return cls(files)
 
 
+def attested_params(rulesets: list[RuleSet]) -> list[dict]:
+    return [r["attested"] for rs in rulesets for r in rs.rules if isinstance(r, dict) and "attested" in r]
+
+
+def verify_attestation(org: str, repo: str, sha: str, p: dict) -> dict | None:
+    """Predicate of an attestation over "<org>/<repo>@<sha>" signed by the given workflow, if one verifies."""
+    with tempfile.NamedTemporaryFile("w", suffix=".txt") as subject:
+        subject.write(f"{org}/{repo}@{sha}")
+        subject.flush()
+        result = subprocess.run(
+            ["gh", "attestation", "verify", subject.name, "--repo", f"{org}/{repo}",
+             "--signer-workflow", p["signer_workflow"], "--predicate-type", p["predicate_type"], "--format", "json"],
+            capture_output=True, text=True, env={**os.environ, "GH_TOKEN": os.environ["GITHUB_TOKEN"]},
+        )
+    if result.returncode != 0:
+        return None
+    return json.loads(result.stdout)[0]["verificationResult"]["statement"]["predicate"]
+
+
 class Scanner:
     def __init__(self, gh: GitHub, org: str, config: Config, app_slug: str | None, dry_run: bool):
         self.gh, self.org, self.config, self.app_slug, self.dry_run = gh, org, config, app_slug, dry_run
@@ -90,6 +114,14 @@ class Scanner:
         entry = self.config.repos.get(repo, {})
         return Facts(repo=repo, team=entry.get("team", ""), manifest_status=entry.get("status"), now=self.now, **kw)
 
+    def attestations(self, repo: str, shas: list[str], rulesets: list[RuleSet]) -> dict[str, dict | None]:
+        """For each attested rule, the first of the given commits with a verified attestation."""
+        found = {}
+        for p in attested_params(rulesets):
+            found[attestation_key(p)] = next(
+                (pred for sha in shas if (pred := verify_attestation(self.org, repo, sha, p)) is not None), None)
+        return found
+
     def our_check(self, repo: str, sha: str) -> dict | None:
         runs = self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/check-runs?check_name={CHECK_NAME}&filter=latest")
         # A check of the same name from another app does not count.
@@ -103,7 +135,9 @@ class Scanner:
         f = self.facts(repo, actor=pr["user"]["login"], sha=sha, branch=pr["head"]["ref"],
                        files=[x["filename"] for x in self.gh.paginate(f"{base}/files")],
                        approvers=current_approvers(reviews, sha))
-        v = evaluate(self.config.merge_sets(repo), f, self.members)
+        sets = self.config.merge_sets(repo)
+        f.attestations = self.attestations(repo, [sha], sets)
+        v = evaluate(sets, f, self.members)
         conclusion = "success" if v.passed else "failure"
         summary = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
         print(f"merge  {repo}#{pr['number']} {sha[:7]} {conclusion}\n{summary}")
@@ -154,7 +188,9 @@ class Scanner:
                        other_runs=other_runs, break_glass=break_glass)
 
         for env in envs:
-            v = evaluate(self.config.deploy_sets(repo, env), f, self.members, self.config.baseline.get("break_glass"))
+            sets = self.config.deploy_sets(repo, env)
+            f.attestations = self.attestations(repo, [sha, *(pr["head"]["sha"] for pr in prs)], sets)
+            v = evaluate(sets, f, self.members, self.config.baseline.get("break_glass"))
             state = "approved" if v.passed else "rejected"
             comment = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
             print(f"deploy {repo} run {run['id']} {env} {state}\n{comment}")
