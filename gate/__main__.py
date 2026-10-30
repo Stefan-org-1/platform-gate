@@ -1,88 +1,189 @@
-"""Evaluate open PRs across the org and post a `policy` check on each head commit."""
+"""Evaluate open PRs and waiting deploys across the org, and answer as the platform App.
+
+PRs get a `policy` check on their head commit. Deploys waiting on an environment get an
+approve or reject through the custom deployment protection rule.
+"""
 
 import argparse
 import base64
 import pathlib
+import urllib.error
+from datetime import datetime, timezone
+from functools import cache
 
 import yaml
 
 from .github import GitHub
-from .policy import PullRequest, evaluate
+from .policy import APPROVE_BREAK_GLASS, APPROVE_DEPLOY, BreakGlass, Facts, RuleSet, current_approvers, evaluate
 
 CHECK_NAME = "policy"
 
 
-def load_manifest(gh: GitHub, org: str, local_dir: str = None) -> dict[str, dict]:
-    if local_dir:
-        files = [p.read_text() for p in pathlib.Path(local_dir).glob("*.yaml")]
-    else:
-        files = [
-            base64.b64decode(gh.get(f["url"])["content"]).decode()
-            for f in gh.get(f"/repos/{org}/org-config/contents/repos")
-            if f["name"].endswith(".yaml")
+def parse_time(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+class Config:
+    def __init__(self, files: dict[str, str]):
+        """files: path relative to the org-config root -> text."""
+        load = lambda p: yaml.safe_load(files[p])
+        self.baseline = load("baseline.yaml")
+        self.rulesets = {
+            pathlib.PurePath(p).stem: RuleSet(pathlib.PurePath(p).stem, d["rules"], d.get("break_glass", False))
+            for p, d in ((p, load(p)) for p in files if p.startswith("rulesets/"))
+        }
+        self.repos = {}
+        for p in (p for p in files if p.startswith("repos/")):
+            team = load(p)
+            for r in team["repos"]:
+                self.repos[r["name"]] = {**r, "team": team["team"]}
+        for name in self._all_set_names():
+            if name not in self.rulesets:
+                raise ValueError(f"Unknown rule set {name}")
+
+    def _all_set_names(self):
+        yield from self.baseline["merge"] + self.baseline["deploy"]
+        for r in self.repos.values():
+            sets = r.get("rulesets", {})
+            yield from sets.get("merge", [])
+            for names in sets.get("deploy", {}).values():
+                yield from names
+
+    def merge_sets(self, repo: str) -> list[RuleSet]:
+        own = self.repos.get(repo, {}).get("rulesets", {}).get("merge", [])
+        return [self.rulesets[n] for n in self.baseline["merge"] + own]
+
+    def deploy_sets(self, repo: str, env: str) -> list[RuleSet]:
+        own = self.repos.get(repo, {}).get("rulesets", {}).get("deploy", {}).get(env, [])
+        return [self.rulesets[n] for n in self.baseline["deploy"] + own]
+
+    @classmethod
+    def from_dir(cls, root: str):
+        root = pathlib.Path(root)
+        return cls({str(p.relative_to(root)): p.read_text() for p in root.glob("**/*.yaml")})
+
+    @classmethod
+    def from_github(cls, gh: GitHub, org: str):
+        files = {}
+        for d in ("", "rulesets", "repos"):
+            for f in gh.get(f"/repos/{org}/org-config/contents/{d}"):
+                if f["type"] == "file" and f["name"].endswith(".yaml"):
+                    files[f["path"]] = base64.b64decode(gh.get(f["url"])["content"]).decode()
+        return cls(files)
+
+
+class Scanner:
+    def __init__(self, gh: GitHub, org: str, config: Config, app_slug: str | None, dry_run: bool):
+        self.gh, self.org, self.config, self.app_slug, self.dry_run = gh, org, config, app_slug, dry_run
+        self.now = datetime.now(timezone.utc)
+
+    @cache
+    def members(self, team: str) -> set[str]:
+        try:
+            return frozenset(m["login"] for m in self.gh.paginate(f"/orgs/{self.org}/teams/{team}/members"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return frozenset()
+            raise
+
+    def facts(self, repo: str, **kw) -> Facts:
+        entry = self.config.repos.get(repo, {})
+        return Facts(repo=repo, team=entry.get("team", ""), manifest_status=entry.get("status"), now=self.now, **kw)
+
+    def our_check(self, repo: str, sha: str) -> dict | None:
+        runs = self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/check-runs?check_name={CHECK_NAME}&filter=latest")
+        # A check of the same name from another app does not count.
+        return next((r for r in runs["check_runs"] if r["app"]["slug"] == self.app_slug), None)
+
+    def scan_pr(self, repo: str, pr: dict):
+        base = f"/repos/{self.org}/{repo}/pulls/{pr['number']}"
+        sha = pr["head"]["sha"]
+        reviews = [{"user": r["user"]["login"], "state": r["state"], "commit_id": r["commit_id"]}
+                   for r in self.gh.paginate(f"{base}/reviews")]
+        f = self.facts(repo, actor=pr["user"]["login"], sha=sha, branch=pr["head"]["ref"],
+                       files=[x["filename"] for x in self.gh.paginate(f"{base}/files")],
+                       approvers=current_approvers(reviews, sha))
+        v = evaluate(self.config.merge_sets(repo), f, self.members)
+        conclusion = "success" if v.passed else "failure"
+        summary = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
+        print(f"merge  {repo}#{pr['number']} {sha[:7]} {conclusion}\n{summary}")
+        if self.dry_run:
+            return
+        existing = self.our_check(repo, sha)
+        if existing and existing["conclusion"] == conclusion and existing["output"]["summary"] == summary:
+            return
+        self.gh.post(f"/repos/{self.org}/{repo}/check-runs", {
+            "name": CHECK_NAME, "head_sha": sha, "status": "completed", "conclusion": conclusion,
+            "output": {"title": f"Policy {conclusion}", "summary": summary},
+        })
+
+    def comment_approvers(self, repo: str, issue: int, command: str, since: datetime) -> set[str]:
+        return {c["user"]["login"] for c in self.gh.paginate(f"/repos/{self.org}/{repo}/issues/{issue}/comments")
+                if c["body"].strip() == command and parse_time(c["created_at"]) >= since}
+
+    def scan_deploy(self, repo: str, run: dict):
+        base = f"/repos/{self.org}/{repo}/actions/runs/{run['id']}"
+        sha, started = run["head_sha"], parse_time(run["created_at"])
+        envs = [p["environment"]["name"] for p in self.gh.get(f"{base}/pending_deployments")]
+
+        approvers = {a["user"]["login"] for a in self.gh.get(f"{base}/approvals") if a["state"] == "approved"}
+        for pr in self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/pulls"):
+            approvers |= self.comment_approvers(repo, pr["number"], APPROVE_DEPLOY, started)
+
+        break_glass = [
+            BreakGlass(i["number"], parse_time(i["created_at"]),
+                       self.comment_approvers(repo, i["number"], APPROVE_BREAK_GLASS, parse_time(i["created_at"])))
+            for i in self.gh.paginate(f"/repos/{self.org}/{repo}/issues?labels=break-glass&state=open")
+            if sha in (i["body"] or "")
         ]
-    manifest = {}
-    for text in files:
-        team = yaml.safe_load(text)
-        for repo in team["repos"]:
-            manifest[repo["name"]] = {**repo, "team": team["team"]}
-    return manifest
+        other_runs = [r["conclusion"] or r["status"]
+                      for r in self.gh.paginate(f"/repos/{self.org}/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
+                      if r["id"] != run["id"]]
+        check = self.our_check(repo, sha) if self.app_slug else None
 
+        f = self.facts(repo, actor=run["triggering_actor"]["login"], sha=sha, branch=run["head_branch"],
+                       approvers=approvers, workflows=[w["path"] for w in run.get("referenced_workflows", [])],
+                       checks={CHECK_NAME: check["conclusion"]} if check else {},
+                       other_runs=other_runs, break_glass=break_glass)
 
-def fetch_pr(gh: GitHub, org: str, repo: str, pr: dict) -> PullRequest:
-    base = f"/repos/{org}/{repo}/pulls/{pr['number']}"
-    return PullRequest(
-        repo=repo,
-        number=pr["number"],
-        author=pr["user"]["login"],
-        head_sha=pr["head"]["sha"],
-        files=[f["filename"] for f in gh.paginate(f"{base}/files")],
-        reviews=[
-            {"user": r["user"]["login"], "state": r["state"], "commit_id": r["commit_id"]}
-            for r in gh.paginate(f"{base}/reviews")
-        ],
-    )
+        for env in envs:
+            v = evaluate(self.config.deploy_sets(repo, env), f, self.members, self.config.baseline.get("break_glass"))
+            state = "approved" if v.passed else "rejected"
+            comment = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
+            print(f"deploy {repo} run {run['id']} {env} {state}\n{comment}")
+            if self.dry_run:
+                continue
+            try:
+                self.gh.post(f"{base}/deployment_protection_rule",
+                             {"environment_name": env, "state": state, "comment": comment[:1024]})
+            except urllib.error.HTTPError as e:
+                # The App is not a protection rule on this environment, or already answered.
+                print(f"  not answered: HTTP {e.code}")
 
-
-def already_posted(gh: GitHub, app_slug: str, org: str, repo: str, sha: str, conclusion: str, summary: str) -> bool:
-    runs = gh.get(f"/repos/{org}/{repo}/commits/{sha}/check-runs?check_name={CHECK_NAME}&filter=latest")["check_runs"]
-    # A check of the same name from another app does not count.
-    ours = [r for r in runs if r["app"]["slug"] == app_slug]
-    return any(r["conclusion"] == conclusion and r["output"]["summary"] == summary for r in ours)
+    def run(self):
+        for repo in self.gh.paginate(f"/orgs/{self.org}/repos?type=all"):
+            if repo["archived"]:
+                continue
+            name = repo["name"]
+            for pr in self.gh.paginate(f"/repos/{self.org}/{name}/pulls?state=open"):
+                self.scan_pr(name, pr)
+            for run in self.gh.paginate(f"/repos/{self.org}/{name}/actions/runs?status=waiting", "workflow_runs"):
+                self.scan_deploy(name, run)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--org", required=True)
-    parser.add_argument("--manifest-dir", help="Read the manifest from a local repos/ folder")
-    parser.add_argument("--app-slug", help="Slug of the App posting checks; required unless --dry-run")
+    parser.add_argument("--config-dir", help="Read org-config from a local checkout")
+    parser.add_argument("--app-slug", help="Slug of the App posting results; required unless --dry-run")
     parser.add_argument("--dry-run", action="store_true", help="Print verdicts, post nothing")
     args = parser.parse_args()
     if not args.dry_run and not args.app_slug:
         parser.error("--app-slug is required unless --dry-run")
 
     gh = GitHub()
-    manifest = load_manifest(gh, args.org, args.manifest_dir)
-    sentinels = {m["login"] for m in gh.paginate(f"/orgs/{args.org}/teams/group-sentinels/members")}
-
-    for repo in gh.paginate(f"/orgs/{args.org}/repos?type=all"):
-        if repo["archived"]:
-            continue
-        for raw in gh.paginate(f"/repos/{args.org}/{repo['name']}/pulls?state=open"):
-            pr = fetch_pr(gh, args.org, repo["name"], raw)
-            verdict = evaluate(pr, manifest, sentinels)
-            conclusion = "success" if verdict.passed else "failure"
-            summary = "All policy rules pass." if verdict.passed else "\n".join(f"- {r}" for r in verdict.reasons)
-            print(f"{repo['name']}#{pr.number} {pr.head_sha[:7]} {conclusion}: {summary}")
-            if args.dry_run or already_posted(gh, args.app_slug, args.org, repo["name"], pr.head_sha, conclusion, summary):
-                continue
-            gh.post(f"/repos/{args.org}/{repo['name']}/check-runs", {
-                "name": CHECK_NAME,
-                "head_sha": pr.head_sha,
-                "status": "completed",
-                "conclusion": conclusion,
-                "output": {"title": f"Policy {conclusion}", "summary": summary},
-            })
+    config = Config.from_dir(args.config_dir) if args.config_dir else Config.from_github(gh, args.org)
+    Scanner(gh, args.org, config, args.app_slug, args.dry_run).run()
 
 
 if __name__ == "__main__":
