@@ -20,7 +20,7 @@ import yaml
 
 from .changes import ChangeSource, FileChanges
 from .github import GitHub
-from .policy import Facts, RuleSet, Verdict, attestation_key, current_approvers, evaluate
+from .policy import RULES, Facts, RuleSet, Verdict, attestation_key, current_approvers, evaluate
 
 CHECK_NAME = "policy"
 RELEASE_TAG = re.compile(r"\d+\.\d+\.\d+")
@@ -74,9 +74,14 @@ class Config:
             team = load(p)
             for r in team["repos"]:
                 self.repos[r["name"]] = {**r, "team": team["team"]}
-        for name in self._all_set_names():
-            if name not in self.rulesets:
-                raise ValueError(f"Unknown rule set {name}")
+        problems = sorted({f"Unknown rule set {n}" for n in self._all_set_names() if n not in self.rulesets})
+        for rs in self.rulesets.values():
+            for rule in rs.rules:
+                kind = next(iter(rule)) if isinstance(rule, dict) else rule
+                if kind not in RULES:
+                    problems.append(f"Rule set {rs.name}: unknown rule type {kind}")
+        if problems:
+            raise ValueError("\n".join(problems))
 
     def _all_set_names(self):
         yield from self.baseline["merge"]
@@ -294,13 +299,25 @@ def main():
     parser.add_argument("--policy-dir", help="Read org-policy from a local checkout; needs --manifest-dir")
     parser.add_argument("--app-slug", help="Slug of the App posting results; required unless --dry-run")
     parser.add_argument("--dry-run", action="store_true", help="Print verdicts, post nothing")
+    parser.add_argument("--check", action="store_true",
+                        help="Only check that the manifest and policy load: every rule set and rule type exists")
     parser.add_argument("--run", metavar="REPO/RUN_ID", help="Evaluate only this deploy run, waiting or not; needs --dry-run")
     parser.add_argument("--env", help="Environment to evaluate --run against")
     args = parser.parse_args()
-    if not args.dry_run and not args.app_slug:
+    if not args.dry_run and not args.app_slug and not args.check:
         parser.error("--app-slug is required unless --dry-run")
     if args.run and not (args.dry_run and args.env):
         parser.error("--run needs --dry-run and --env")
+
+    if args.check:
+        if not args.manifest_dir:
+            parser.error("--check needs --manifest-dir and --policy-dir")
+        try:
+            Config.from_dirs(args.manifest_dir, args.policy_dir)
+        except ValueError as e:
+            raise SystemExit(f"{e}")
+        print("Manifest and policy load")
+        return
 
     gh = GitHub()
     if bool(args.manifest_dir) != bool(args.policy_dir):

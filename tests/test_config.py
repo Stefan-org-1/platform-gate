@@ -13,6 +13,12 @@ class LoadsOrgConfig(unittest.TestCase):
         config = Config.from_dirs(MANIFEST, POLICY)
         self.assertTrue(config.deploy_sets("payments-web", "prod"))
 
+    def test_unknown_rule_type_is_rejected(self):
+        files = {"baseline.yaml": "merge: [x]\ndeploy: {all: []}\n", "change-management.yaml": "source: file\nrepo: x\n",
+                 "rulesets/x.yaml": "rules: [no_such_rule]\n"}
+        with self.assertRaisesRegex(ValueError, "unknown rule type no_such_rule"):
+            Config(files)
+
     def test_unknown_rule_set_is_rejected(self):
         files = {"baseline.yaml": "merge: [nope]\ndeploy: {all: []}\n", "change-management.yaml": "source: file\nrepo: x\n"}
         with self.assertRaises(ValueError):
