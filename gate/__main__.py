@@ -24,6 +24,24 @@ from .policy import (APPROVE_BREAK_GLASS, APPROVE_DEPLOY, BreakGlass, Facts, Rul
 CHECK_NAME = "policy"
 
 
+def gate_run_url() -> str | None:
+    """Link to this gate run, when running in Actions."""
+    if "GITHUB_RUN_ID" not in os.environ:
+        return None
+    return f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+
+
+def report(org: str, reasons: list[str], sets: list[RuleSet], links: dict[str, str]) -> str:
+    """Markdown body: reasons, links, and the rule sets that were checked."""
+    lines = [f"- {r}" for r in reasons] or ["All rule sets pass."]
+    present = [f"{name}: {url}" for name, url in links.items() if url]
+    lines += ["", *present] if present else []
+    lines.append("")
+    lines.append("Rule sets checked: " + ", ".join(
+        f"[{rs.name}](https://github.com/{org}/org-config/blob/main/rulesets/{rs.name}.yaml)" for rs in sets))
+    return "\n".join(lines)
+
+
 def parse_time(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
@@ -139,7 +157,8 @@ class Scanner:
         f.attestations = self.attestations(repo, [sha], sets)
         v = evaluate(sets, f, self.members)
         conclusion = "success" if v.passed else "failure"
-        summary = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
+        # No per-run links here: an unchanged summary is how a repeat post is skipped.
+        summary = report(self.org, v.reasons, sets, {})
         print(f"merge  {repo}#{pr['number']} {sha[:7]} {conclusion}\n{summary}")
         if self.dry_run:
             return
@@ -148,6 +167,7 @@ class Scanner:
             return
         self.gh.post(f"/repos/{self.org}/{repo}/check-runs", {
             "name": CHECK_NAME, "head_sha": sha, "status": "completed", "conclusion": conclusion,
+            "details_url": gate_run_url(),
             "output": {"title": f"Policy {conclusion}", "summary": summary},
         })
 
@@ -192,10 +212,18 @@ class Scanner:
             f.attestations = self.attestations(repo, [sha, *(pr["head"]["sha"] for pr in prs)], sets)
             v = evaluate(sets, f, self.members, self.config.baseline.get("break_glass"))
             state = "approved" if v.passed else "rejected"
-            comment = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
-            print(f"deploy {repo} run {run['id']} {env} {state}\n{comment}")
+            summary = report(self.org, v.reasons, sets, {"Deploy run": run["html_url"], "Gate run": gate_run_url()})
+            print(f"deploy {repo} run {run['id']} {env} {state}\n{summary}")
             if self.dry_run:
                 continue
+            # The protection rule comment is easy to miss, so the full report also goes on the commit.
+            check = self.gh.post(f"/repos/{self.org}/{repo}/check-runs", {
+                "name": f"deploy-policy ({env})", "head_sha": sha, "status": "completed",
+                "conclusion": "success" if v.passed else "failure", "details_url": run["html_url"],
+                "output": {"title": f"Deploy to {env} {state}", "summary": summary},
+            })
+            comment = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
+            comment = f"Details: {check['html_url']}\n{comment}"
             try:
                 self.gh.post(f"{base}/deployment_protection_rule",
                              {"environment_name": env, "state": state, "comment": comment[:1024]})
