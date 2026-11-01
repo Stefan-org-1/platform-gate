@@ -38,12 +38,19 @@ def ruleset_url(org: str, name: str) -> str:
     return f"https://github.com/{org}/org-config/blob/main/rulesets/{name}.yaml"
 
 
+def sections(v: Verdict, fmt=lambda r: r) -> list[str]:
+    """Not met, then met, as Markdown lists."""
+    lines = ["**Not met**", *(f"- {fmt(r)}" for r in v.reasons)] if v.reasons else ["All rule sets pass."]
+    if v.notes:
+        lines += ["", "**Met**", *(f"- {fmt(n)}" for n in v.notes)]
+    return lines
+
+
 def report(org: str, v: Verdict, sets: list[RuleSet], links: dict[str, str]) -> str:
-    """Markdown body: reasons, how passing rules were met, links, and the rule sets checked."""
+    """Markdown body: what was not met, how the rest was met, links, and the rule sets checked."""
     # "[set] reason" -> "[set](link to its definition) reason"
     linked = lambda r: re.sub(r"^\[([\w-]+)\]", lambda m: f"[{m[1]}]({ruleset_url(org, m[1])})", r)
-    lines = [f"- {linked(r)}" for r in v.reasons] or ["All rule sets pass."]
-    lines += [f"- {linked(n)}" for n in v.notes]
+    lines = sections(v, linked)
     present = [f"{name}: {url}" for name, url in links.items() if url]
     lines += ["", *present] if present else []
     lines.append("")
@@ -110,7 +117,7 @@ def attested_params(rulesets: list[RuleSet]) -> list[dict]:
 
 
 def verify_attestation(org: str, repo: str, sha: str, signer: str, predicate_type: str) -> dict | None:
-    """Predicate of an attestation over "<org>/<repo>@<sha>" signed by the given workflow, if one verifies."""
+    """Signer and predicate of an attestation over "<org>/<repo>@<sha>" signed by the given workflow, if one verifies."""
     with tempfile.NamedTemporaryFile("w", suffix=".txt") as subject:
         subject.write(f"{org}/{repo}@{sha}")
         subject.flush()
@@ -121,7 +128,8 @@ def verify_attestation(org: str, repo: str, sha: str, signer: str, predicate_typ
         )
     if result.returncode != 0:
         return None
-    return json.loads(result.stdout)[0]["verificationResult"]["statement"]["predicate"]
+    v = json.loads(result.stdout)[0]["verificationResult"]
+    return {"signer": v["signature"]["certificate"]["buildSignerURI"], "predicate": v["statement"]["predicate"]}
 
 
 class Scanner:
@@ -196,13 +204,14 @@ class Scanner:
         return [b for b in branches
                 if self.gh.get(f"/repos/{self.org}/{repo}/compare/{sha}...{b}")["behind_by"] == 0]
 
-    def deployed_to(self, repo: str, sha: str) -> list[str]:
-        """Environments where a deployment of sha last ended in success."""
-        envs = []
+    def deployed_to(self, repo: str, sha: str) -> dict[str, str]:
+        """Environment -> link to the newest deployment of sha there that ended in success."""
+        envs = {}
+        # Newest first, so the first success per environment wins.
         for d in self.gh.paginate(f"/repos/{self.org}/{repo}/deployments?sha={sha}"):
             statuses = self.gh.get(f"/repos/{self.org}/{repo}/deployments/{d['id']}/statuses?per_page=1")
-            if statuses and statuses[0]["state"] == "success":
-                envs.append(d["environment"])
+            if statuses and statuses[0]["state"] == "success" and d["environment"] not in envs:
+                envs[d["environment"]] = statuses[0]["log_url"] or statuses[0]["target_url"]
         return envs
 
     def scan_deploy(self, repo: str, run: dict, envs: list[str] | None = None):
@@ -250,8 +259,7 @@ class Scanner:
                 "conclusion": "success" if v.passed else "failure", "details_url": run["html_url"],
                 "output": {"title": f"Deploy to {env} {state}", "summary": summary},
             })
-            comment = "\n".join([*(f"- {r}" for r in v.reasons), *(["All rule sets pass."] if not v.reasons else []),
-                                 *(f"- {n}" for n in v.notes)])
+            comment = "\n".join(sections(v))
             # Links stay in the check run: the comment keeps their text to fit the limit.
             comment = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", comment)
             comment = f"Details: {check['html_url']}\n{comment}"

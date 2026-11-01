@@ -199,10 +199,14 @@ class DeployedTo(unittest.TestCase):
     sets = [RuleSet("staged", [{"deployed_to": {"environment": "staging"}}], break_glass=True)]
 
     def test_deployed_to_staging_passes(self):
-        self.assertTrue(evaluate(self.sets, facts(deployed_to=["test", "staging"]), members).passed)
+        self.assertTrue(evaluate(self.sets, facts(deployed_to={"test": "https://t", "staging": "https://s"}), members).passed)
+
+    def test_pass_links_the_deploy(self):
+        v = evaluate(self.sets, facts(deployed_to={"staging": "https://s"}), members)
+        self.assertEqual(v.notes, ["[staged] Deployed to staging before: [deploy](https://s)"])
 
     def test_not_deployed_fails(self):
-        v = evaluate(self.sets, facts(deployed_to=["test"]), members)
+        v = evaluate(self.sets, facts(deployed_to={"test": "https://t"}), members)
         self.assertIn("has not been deployed to staging", v.reasons[0])
 
 
@@ -216,11 +220,11 @@ class Attested(unittest.TestCase):
         self.assertFalse(evaluate(self.sets, facts(), members).passed)
 
     def test_passing_attestation_passes(self):
-        f = facts(attestations={self.key: {"secret_scan": "pass"}})
+        f = facts(attestations={self.key: {"signer": "scan.yml@scan-v1", "predicate": {"secret_scan": "pass"}}})
         self.assertTrue(evaluate(self.sets, f, members).passed)
 
     def test_failing_predicate_fails(self):
-        f = facts(attestations={self.key: {"secret_scan": "fail"}})
+        f = facts(attestations={self.key: {"signer": "scan.yml@scan-v1", "predicate": {"secret_scan": "fail"}}})
         self.assertFalse(evaluate(self.sets, f, members).passed)
 
 

@@ -25,7 +25,7 @@ class Facts:
     branch: str = ""  # branch or tag the run was started from
     tags: list[str] = field(default_factory=list)  # release tags (X.Y.Z) on the commit
     on_branches: list[str] = field(default_factory=list)  # release branches (main, release/*) that contain the commit
-    deployed_to: list[str] = field(default_factory=list)  # environments the commit was deployed to successfully
+    deployed_to: dict[str, str] = field(default_factory=dict)  # environment -> link to its last successful deploy of the commit
     files: list[str] = field(default_factory=list)
     approvers: set[str] = field(default_factory=set)
     workflows: list[str] = field(default_factory=list)  # reusable workflows used, "owner/repo/path@ref"
@@ -34,7 +34,7 @@ class Facts:
     env: str = ""  # deploys only
     changes: list["Change"] = field(default_factory=list)  # the repo's change requests
     changes_url: str = ""  # where the repo's change requests live
-    # attestation_key(params) -> predicate of a verified attestation, or None
+    # attestation_key(params) -> {"signer": workflow ref that signed, "predicate": ...} of a verified attestation, or None
     attestations: dict[str, dict | None] = field(default_factory=dict)
 
 
@@ -178,9 +178,18 @@ def _release_tag(f: Facts, p: dict, members: Members) -> str | None:
     return None
 
 
+def _release_tag_note(f: Facts, p: dict, members: Members) -> str:
+    return f"Release {', '.join(f.tags)} at {f.sha[:7]}, on {', '.join(f.on_branches)}"
+
+
 def _deployed_to(f: Facts, p: dict, members: Members) -> str | None:
     env = p["environment"]
     return None if env in f.deployed_to else f"{f.sha[:7]} has not been deployed to {env} successfully. Deploy it there first"
+
+
+def _deployed_to_note(f: Facts, p: dict, members: Members) -> str:
+    env = p["environment"]
+    return f"Deployed to {env} before: [deploy]({f.deployed_to[env]})"
 
 
 def _check_passed(f: Facts, p: dict, members: Members) -> str | None:
@@ -211,9 +220,10 @@ def attestation_key(p: dict) -> str:
 
 
 def _attested(f: Facts, p: dict, members: Members) -> str | None:
-    predicate = f.attestations.get(attestation_key(p))
-    if predicate is None:
+    found = f.attestations.get(attestation_key(p))
+    if found is None:
         return f"No attestation for {f.sha[:7]} signed by {' or '.join(p['signer_workflows'])}"
+    predicate = found["predicate"]
     wrong = [k for k, v in p.get("require", {}).items() if predicate.get(k) != v]
     if wrong:
         return f"Attestation for {f.sha[:7]} does not show " + ", ".join(f"{k}={p['require'][k]}" for k in wrong)
@@ -221,7 +231,14 @@ def _attested(f: Facts, p: dict, members: Members) -> str | None:
 
 
 # Rules whose pass is worth explaining: name -> function giving the note.
-NOTES = {"change_approved": _change_approved_note}
+def _attested_note(f: Facts, p: dict, members: Members) -> str:
+    found = f.attestations[attestation_key(p)]
+    shown = ", ".join(f"{k}={v}" for k, v in found["predicate"].items())
+    return f"Signed by {found['signer']}: {shown}"
+
+
+NOTES = {"change_approved": _change_approved_note, "release_tag": _release_tag_note,
+         "deployed_to": _deployed_to_note, "attested": _attested_note}
 
 RULES = {
     "attested": _attested,
