@@ -31,7 +31,7 @@ class Facts:
     env: str = ""  # deploys only
     changes: list["Change"] = field(default_factory=list)  # the repo's change requests
     changes_url: str = ""  # where the repo's change requests live
-    # "signer_workflow|predicate_type" -> predicate of a verified attestation, or None
+    # attestation_key(params) -> predicate of a verified attestation, or None
     attestations: dict[str, dict | None] = field(default_factory=dict)
 
 
@@ -187,13 +187,13 @@ def _deploy_window(f: Facts, p: dict, members: Members) -> str | None:
 
 
 def attestation_key(p: dict) -> str:
-    return f"{p['signer_workflow']}|{p['predicate_type']}"
+    return "|".join([*p["signer_workflows"], p["predicate_type"]])
 
 
 def _attested(f: Facts, p: dict, members: Members) -> str | None:
     predicate = f.attestations.get(attestation_key(p))
     if predicate is None:
-        return f"No attestation for {f.sha[:7]} signed by {p['signer_workflow']}"
+        return f"No attestation for {f.sha[:7]} signed by {' or '.join(p['signer_workflows'])}"
     wrong = [k for k, v in p.get("require", {}).items() if predicate.get(k) != v]
     if wrong:
         return f"Attestation for {f.sha[:7]} does not show " + ", ".join(f"{k}={p['require'][k]}" for k in wrong)

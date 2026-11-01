@@ -104,14 +104,14 @@ def attested_params(rulesets: list[RuleSet]) -> list[dict]:
     return [r["attested"] for rs in rulesets for r in rs.rules if isinstance(r, dict) and "attested" in r]
 
 
-def verify_attestation(org: str, repo: str, sha: str, p: dict) -> dict | None:
+def verify_attestation(org: str, repo: str, sha: str, signer: str, predicate_type: str) -> dict | None:
     """Predicate of an attestation over "<org>/<repo>@<sha>" signed by the given workflow, if one verifies."""
     with tempfile.NamedTemporaryFile("w", suffix=".txt") as subject:
         subject.write(f"{org}/{repo}@{sha}")
         subject.flush()
         result = subprocess.run(
             ["gh", "attestation", "verify", subject.name, "--repo", f"{org}/{repo}",
-             "--signer-workflow", p["signer_workflow"], "--predicate-type", p["predicate_type"], "--format", "json"],
+             "--signer-workflow", signer, "--predicate-type", predicate_type, "--format", "json"],
             capture_output=True, text=True, env={**os.environ, "GH_TOKEN": os.environ["GITHUB_TOKEN"]},
         )
     if result.returncode != 0:
@@ -140,11 +140,13 @@ class Scanner:
         return Facts(org=self.org, repo=repo, team=entry.get("team", ""), manifest_status=entry.get("status"), now=self.now, **kw)
 
     def attestations(self, repo: str, shas: list[str], rulesets: list[RuleSet]) -> dict[str, dict | None]:
-        """For each attested rule, the first of the given commits with a verified attestation."""
+        """For each attested rule, the first verified attestation: commits in order, then signers in order."""
         found = {}
         for p in attested_params(rulesets):
+            tries = ((sha, signer) for sha in shas for signer in p["signer_workflows"])
             found[attestation_key(p)] = next(
-                (pred for sha in shas if (pred := verify_attestation(self.org, repo, sha, p)) is not None), None)
+                (pred for sha, signer in tries
+                 if (pred := verify_attestation(self.org, repo, sha, signer, p["predicate_type"])) is not None), None)
         return found
 
     def our_check(self, repo: str, sha: str) -> dict | None:

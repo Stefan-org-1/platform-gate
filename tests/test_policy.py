@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from gate.policy import Change, Facts, RuleSet, current_approvers, evaluate, slots_filled
+from gate.policy import Change, Facts, attestation_key, RuleSet, current_approvers, evaluate, slots_filled
 
 HEAD = "a" * 40
 WED_NOON = datetime(2026, 10, 28, 16, 0, tzinfo=timezone.utc)  # 12:00 Toronto
@@ -163,10 +163,10 @@ class Deploy(unittest.TestCase):
 
 
 class Attested(unittest.TestCase):
-    params = {"signer_workflow": "Stefan-org-1/ci-templates/.github/workflows/node-build.yml",
+    params = {"signer_workflows": ["Stefan-org-1/ci-templates/.github/workflows/scan.yml"],
               "predicate_type": "https://example.com/scan/v1", "require": {"secret_scan": "pass"}}
     sets = [RuleSet("scanned", [{"attested": params}])]
-    key = f"{params['signer_workflow']}|{params['predicate_type']}"
+    key = attestation_key(params)
 
     def test_missing_attestation_fails(self):
         self.assertFalse(evaluate(self.sets, facts(), members).passed)
