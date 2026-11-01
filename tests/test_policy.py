@@ -177,6 +177,24 @@ class ReleaseTag(unittest.TestCase):
         self.assertIn("not on main or a release/X.Y.z branch", v.reasons[0])
 
 
+def run(event, conclusion):
+    return {"name": "ci", "event": event, "conclusion": conclusion, "url": "https://example.com/run"}
+
+
+class PipelineGreen(unittest.TestCase):
+    sets = [RuleSet("green-pipeline", [{"pipeline_green": {"events": ["push", "pull_request"]}}])]
+
+    def test_failed_ci_fails(self):
+        v = evaluate(self.sets, facts(other_runs=[run("push", "failure")]), members)
+        self.assertIn("ci](https://example.com/run) (push): failure", v.reasons[0])
+
+    def test_running_ci_fails(self):
+        self.assertFalse(evaluate(self.sets, facts(other_runs=[run("push", "in_progress")]), members).passed)
+
+    def test_failed_release_or_deploy_run_is_ignored(self):
+        self.assertTrue(evaluate(self.sets, facts(other_runs=[run("workflow_dispatch", "failure")]), members).passed)
+
+
 class DeployedTo(unittest.TestCase):
     sets = [RuleSet("staged", [{"deployed_to": {"environment": "staging"}}], break_glass=True)]
 

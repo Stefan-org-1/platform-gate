@@ -30,7 +30,7 @@ class Facts:
     approvers: set[str] = field(default_factory=set)
     workflows: list[str] = field(default_factory=list)  # reusable workflows used, "owner/repo/path@ref"
     checks: dict[str, str] = field(default_factory=dict)  # check name -> conclusion
-    other_runs: list[str] = field(default_factory=list)  # conclusions of other workflow runs on the commit
+    other_runs: list[dict] = field(default_factory=list)  # other workflow runs on the commit: name, event, conclusion, url
     env: str = ""  # deploys only
     changes: list["Change"] = field(default_factory=list)  # the repo's change requests
     changes_url: str = ""  # where the repo's change requests live
@@ -188,8 +188,12 @@ def _check_passed(f: Facts, p: dict, members: Members) -> str | None:
 
 
 def _pipeline_green(f: Facts, p: dict, members: Members) -> str | None:
-    bad = [c for c in f.other_runs if c not in ("success", "skipped", "neutral")]
-    return f"{len(bad)} other workflow run(s) on {f.sha[:7]} are not green" if bad else None
+    # Only runs started by these events count, so a failed release or deploy run does not block later deploys.
+    bad = [r for r in f.other_runs if r["event"] in p["events"] and r["conclusion"] not in ("success", "skipped", "neutral")]
+    if not bad:
+        return None
+    runs = ", ".join(f"[{r['name']}]({r['url']}) ({r['event']}): {r['conclusion']}" for r in bad)
+    return f"Runs on {f.sha[:7]} are not green: {runs}"
 
 
 def _deploy_window(f: Facts, p: dict, members: Members) -> str | None:

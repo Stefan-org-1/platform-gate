@@ -212,7 +212,8 @@ class Scanner:
         if envs is None:
             envs = [p["environment"]["name"] for p in self.gh.get(f"{base}/pending_deployments")]
         prs = self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/pulls")
-        other_runs = [r["conclusion"] or r["status"]
+        other_runs = [{"name": r["name"], "event": r["event"], "conclusion": r["conclusion"] or r["status"],
+                       "url": r["html_url"]}
                       for r in self.gh.paginate(f"/repos/{self.org}/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
                       if r["id"] != run["id"]]
         # Merging creates a new commit, so the merge check sits on the PR's head commit.
