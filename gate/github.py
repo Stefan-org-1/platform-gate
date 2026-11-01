@@ -9,7 +9,7 @@ class GitHub:
     def __init__(self, token: str = None):
         self.token = token or os.environ["GITHUB_TOKEN"]
 
-    def request(self, method: str, path: str, body: dict = None, raw: bool = False):
+    def request(self, method: str, path: str, body: dict = None):
         req = urllib.request.Request(
             path if path.startswith("http") else API + path,
             method=method,
@@ -22,8 +22,6 @@ class GitHub:
         )
         with urllib.request.urlopen(req) as resp:
             body = resp.read()
-            if raw:
-                return body.decode()
             return (json.loads(body) if body else None), resp.headers.get("Link", "")
 
     def get(self, path: str):

@@ -4,6 +4,7 @@ The gate asks a ChangeSource which changes cover a deploy. A Jira or ServiceNow 
 implement the same find().
 """
 
+import base64
 import urllib.error
 from datetime import datetime
 from typing import Protocol
@@ -47,7 +48,8 @@ class FileChanges:
         for f in files:
             if not f["name"].endswith(".yaml"):
                 continue
-            doc = yaml.safe_load(self.gh.request("GET", f["download_url"], raw=True))
+            # Not download_url: raw.githubusercontent.com may serve a copy minutes old.
+            doc = yaml.safe_load(base64.b64decode(self.gh.get(f["url"])["content"]))
             if covers(doc, sha, env, now):
                 found.append(Change(f["path"], f["html_url"], doc["requested_by"], set(doc["approvers"]),
                                     doc["emergency"]))
