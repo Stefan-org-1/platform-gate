@@ -31,7 +31,7 @@ BREAK_GLASS = {"slots": [["sentinels-{team}"], ["managers-{team}"]]}
 def facts(**kw):
     base = dict(org="org", repo="payments-web", team="team-payments", actor="dev", sha=HEAD, now=WED_NOON,
                 manifest_status="active", branch="main", workflows=[f"{TEMPLATE}@refs/tags/v1"],
-                checks={"policy": "success"})
+                checks={"policy": {"conclusion": "success", "url": "https://c", "pr": None}})
     return Facts(**{**base, **kw})
 
 
@@ -160,6 +160,20 @@ class Deploy(unittest.TestCase):
 
     def test_hotfix_branch_needs_emergency_change(self):
         self.assertFalse(self.deploy(branch="hotfix", checks={}, changes=[change({"sen", "mgr"})]).passed)
+
+
+class CheckPassed(unittest.TestCase):
+    sets = [RuleSet("from-main", [{"check_passed": {"name": "policy"}}])]
+
+    def test_failed_on_merged_pr_is_explained(self):
+        f = facts(checks={"policy": {"conclusion": "failure", "url": "https://c",
+                                     "pr": {"number": 7, "url": "https://pr/7"}}})
+        v = evaluate(self.sets, f, members)
+        self.assertIn("Check [policy](https://c) failure on PR [#7](https://pr/7), and the PR was merged anyway",
+                      v.reasons[0])
+
+    def test_missing_check(self):
+        self.assertIn("No policy check", evaluate(self.sets, facts(checks={}), members).reasons[0])
 
 
 class ReleaseTag(unittest.TestCase):

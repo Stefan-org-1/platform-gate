@@ -29,7 +29,8 @@ class Facts:
     files: list[str] = field(default_factory=list)
     approvers: set[str] = field(default_factory=set)
     workflows: list[str] = field(default_factory=list)  # reusable workflows used, "owner/repo/path@ref"
-    checks: dict[str, str] = field(default_factory=dict)  # check name -> conclusion
+    # check name -> {"conclusion", "url", "pr": {"number", "url"} or None when the check is on the commit itself}
+    checks: dict[str, dict] = field(default_factory=dict)
     other_runs: list[dict] = field(default_factory=list)  # other workflow runs on the commit: name, event, conclusion, url
     env: str = ""  # deploys only
     changes: list["Change"] = field(default_factory=list)  # the repo's change requests
@@ -193,7 +194,14 @@ def _deployed_to_note(f: Facts, p: dict, members: Members) -> str:
 
 
 def _check_passed(f: Facts, p: dict, members: Members) -> str | None:
-    return None if f.checks.get(p["name"]) == "success" else f"Check {p['name']} has not passed on {f.sha[:7]}"
+    name, check = p["name"], f.checks.get(p["name"])
+    if check is None:
+        return f"No {name} check on {f.sha[:7]} or the PR that merged it"
+    if check["conclusion"] == "success":
+        return None
+    where = f"PR [#{check['pr']['number']}]({check['pr']['url']})" if check["pr"] else f.sha[:7]
+    merged = ", and the PR was merged anyway" if check["pr"] else ""
+    return f"Check [{name}]({check['url']}) {check['conclusion']} on {where}{merged}"
 
 
 def _pipeline_green(f: Facts, p: dict, members: Members) -> str | None:

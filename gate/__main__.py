@@ -226,11 +226,12 @@ class Scanner:
                       for r in self.gh.paginate(f"/repos/{self.org}/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
                       if r["id"] != run["id"]]
         # Merging creates a new commit, so the merge check sits on the PR's head commit.
-        check = None
+        checks = {}
         if self.app_slug:
-            for candidate in [sha, *(pr["head"]["sha"] for pr in prs)]:
-                check = self.our_check(repo, candidate)
-                if check:
+            for candidate, pr in [(sha, None), *((pr["head"]["sha"], pr) for pr in prs)]:
+                if check := self.our_check(repo, candidate):
+                    checks[CHECK_NAME] = {"conclusion": check["conclusion"], "url": check["html_url"],
+                                          "pr": pr and {"number": pr["number"], "url": pr["html_url"]}}
                     break
 
         tags = self.release_tags(repo, sha)
@@ -238,7 +239,7 @@ class Scanner:
                        tags=tags, on_branches=self.release_branches_with(repo, sha) if tags else [],
                        deployed_to=self.deployed_to(repo, sha),
                        workflows=[w["path"] for w in run.get("referenced_workflows", [])],
-                       checks={CHECK_NAME: check["conclusion"]} if check else {},
+                       checks=checks,
                        other_runs=other_runs)
 
         for env in envs:
