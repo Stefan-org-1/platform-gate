@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from gate.policy import BreakGlass, Facts, RuleSet, current_approvers, evaluate, slots_filled
+from gate.policy import Change, Facts, RuleSet, current_approvers, evaluate, slots_filled
 
 HEAD = "a" * 40
 WED_NOON = datetime(2026, 10, 28, 16, 0, tzinfo=timezone.utc)  # 12:00 Toronto
@@ -22,10 +22,10 @@ WINDOW = RuleSet("deploy-window", [{"deploy_window": {
     "timezone": "America/Toronto", "blocked": [{"days": ["fri"], "after": "16:00"}, {"days": ["sat", "sun"]}]}}],
     break_glass=True)
 FROM_MAIN = RuleSet("from-main", [{"from_branch": {"branch": "main"}}, {"check_passed": {"name": "policy"}}], break_glass=True)
-TWO_PERSON = RuleSet("two-person-deploy", [{"approvals": {"slots": [["sentinels-{team}"], ["managers-{team}"]]}}])
+TWO_PERSON = RuleSet("change-two-person", [{"change_approved": {"slots": [["sentinels-{team}"], ["managers-{team}"]]}}])
 WORKFLOW_SENTINEL = RuleSet("workflow-sentinel", [{"approvals_if_changed": {
     "paths": [".github/workflows/"], "slots": [["group-sentinels"]]}}])
-BREAK_GLASS = {"slots": [["sentinels-{team}"], ["managers-{team}"]], "ttl_hours": 24}
+BREAK_GLASS = {"slots": [["sentinels-{team}"], ["managers-{team}"]]}
 
 
 def facts(**kw):
@@ -84,43 +84,52 @@ class Merge(unittest.TestCase):
         self.assertFalse(evaluate([WORKFLOW_SENTINEL], f, members).passed)
 
 
+def change(approvers, author="requester", emergency=False):
+    return Change("changes/payments-web/x.yaml", "https://example.com/pr/1", author, set(approvers), emergency)
+
+
 class Deploy(unittest.TestCase):
     sets = [INTEGRITY, CENTRAL, WINDOW, FROM_MAIN, TWO_PERSON]
 
-    def test_compliant_deploy_passes(self):
-        self.assertTrue(evaluate(self.sets, facts(approvers={"sen", "mgr"}), members, BREAK_GLASS).passed)
+    def deploy(self, **kw):
+        return evaluate(self.sets, facts(env="prod", **kw), members, BREAK_GLASS)
+
+    def test_approved_change_passes(self):
+        self.assertTrue(self.deploy(changes=[change({"sen", "mgr"})]).passed)
+
+    def test_no_change_fails(self):
+        v = self.deploy()
+        self.assertFalse(v.passed)
+        self.assertIn("No approved change request", v.reasons[0])
 
     def test_missing_second_approver_fails(self):
-        self.assertFalse(evaluate(self.sets, facts(approvers={"sen"}), members, BREAK_GLASS).passed)
+        self.assertFalse(self.deploy(changes=[change({"sen"})]).passed)
 
-    def test_deploy_outside_template_cannot_be_broken_glass(self):
-        bg = BreakGlass(7, WED_NOON, {"sen", "mgr"})
-        f = facts(workflows=[], approvers={"sen", "mgr"}, break_glass=[bg])
-        self.assertFalse(evaluate(self.sets, f, members, BREAK_GLASS).passed)
+    def test_change_author_does_not_count(self):
+        self.assertFalse(self.deploy(changes=[change({"sen", "mgr"}, author="mgr")]).passed)
+
+    def test_deployer_does_not_count(self):
+        self.assertFalse(self.deploy(actor="sen", changes=[change({"sen", "mgr"})]).passed)
+
+    def test_deploy_outside_template_cannot_be_overridden(self):
+        v = self.deploy(workflows=[], changes=[change({"sen", "mgr"}, emergency=True)])
+        self.assertFalse(v.passed)
 
     def test_friday_evening_blocked(self):
-        v = evaluate(self.sets, facts(now=FRI_EVENING, approvers={"sen", "mgr"}), members, BREAK_GLASS)
+        v = self.deploy(now=FRI_EVENING, changes=[change({"sen", "mgr"})])
         self.assertFalse(v.passed)
         self.assertIn("deploy-window", v.reasons[0])
 
-    def test_break_glass_overrides_window(self):
-        bg = BreakGlass(7, FRI_EVENING - timedelta(hours=1), {"sen", "mgr"})
-        f = facts(now=FRI_EVENING, approvers={"sen", "mgr"}, break_glass=[bg])
-        self.assertTrue(evaluate(self.sets, f, members, BREAK_GLASS).passed)
+    def test_emergency_change_overrides_window(self):
+        v = self.deploy(now=FRI_EVENING, changes=[change({"sen", "mgr"}, emergency=True)])
+        self.assertTrue(v.passed)
+        self.assertIn("Overridden by emergency change", v.reasons[-1])
 
-    def test_expired_break_glass_ignored(self):
-        bg = BreakGlass(7, FRI_EVENING - timedelta(hours=25), {"sen", "mgr"})
-        f = facts(now=FRI_EVENING, approvers={"sen", "mgr"}, break_glass=[bg])
-        self.assertFalse(evaluate(self.sets, f, members, BREAK_GLASS).passed)
+    def test_normal_change_does_not_override(self):
+        self.assertFalse(self.deploy(now=FRI_EVENING, changes=[change({"sen", "mgr"})]).passed)
 
-    def test_break_glass_needs_both_approvers(self):
-        bg = BreakGlass(7, FRI_EVENING, {"sen"})
-        f = facts(now=FRI_EVENING, approvers={"sen", "mgr"}, break_glass=[bg])
-        self.assertFalse(evaluate(self.sets, f, members, BREAK_GLASS).passed)
-
-    def test_hotfix_branch_without_merge_check_needs_break_glass(self):
-        f = facts(branch="hotfix", checks={}, approvers={"sen", "mgr"})
-        self.assertFalse(evaluate(self.sets, f, members, BREAK_GLASS).passed)
+    def test_hotfix_branch_needs_emergency_change(self):
+        self.assertFalse(self.deploy(branch="hotfix", checks={}, changes=[change({"sen", "mgr"})]).passed)
 
 
 class Attested(unittest.TestCase):

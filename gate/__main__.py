@@ -17,9 +17,9 @@ from functools import cache
 
 import yaml
 
+from .changes import ChangeSource, GitChanges
 from .github import GitHub
-from .policy import (APPROVE_BREAK_GLASS, APPROVE_DEPLOY, BreakGlass, Facts, RuleSet, attestation_key,
-                     current_approvers, evaluate)
+from .policy import Facts, RuleSet, attestation_key, current_approvers, evaluate
 
 CHECK_NAME = "policy"
 
@@ -42,15 +42,12 @@ def report(org: str, reasons: list[str], sets: list[RuleSet], links: dict[str, s
     return "\n".join(lines)
 
 
-def parse_time(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
-
-
 class Config:
     def __init__(self, files: dict[str, str]):
         """files: path relative to the org-config root -> text."""
         load = lambda p: yaml.safe_load(files[p])
         self.baseline = load("baseline.yaml")
+        self.change_management = load("change-management.yaml")
         self.rulesets = {
             pathlib.PurePath(p).stem: RuleSet(pathlib.PurePath(p).stem, d["rules"], d.get("break_glass", False))
             for p, d in ((p, load(p)) for p in files if p.startswith("rulesets/"))
@@ -115,8 +112,10 @@ def verify_attestation(org: str, repo: str, sha: str, p: dict) -> dict | None:
 
 
 class Scanner:
-    def __init__(self, gh: GitHub, org: str, config: Config, app_slug: str | None, dry_run: bool):
-        self.gh, self.org, self.config, self.app_slug, self.dry_run = gh, org, config, app_slug, dry_run
+    def __init__(self, gh: GitHub, org: str, config: Config, changes: ChangeSource, app_slug: str | None,
+                 dry_run: bool):
+        self.gh, self.org, self.config, self.changes = gh, org, config, changes
+        self.app_slug, self.dry_run = app_slug, dry_run
         self.now = datetime.now(timezone.utc)
 
     @cache
@@ -171,26 +170,11 @@ class Scanner:
             "output": {"title": f"Policy {conclusion}", "summary": summary},
         })
 
-    def comment_approvers(self, repo: str, issue: int, command: str, since: datetime) -> set[str]:
-        return {c["user"]["login"] for c in self.gh.paginate(f"/repos/{self.org}/{repo}/issues/{issue}/comments")
-                if c["body"].strip() == command and parse_time(c["created_at"]) >= since}
-
     def scan_deploy(self, repo: str, run: dict):
         base = f"/repos/{self.org}/{repo}/actions/runs/{run['id']}"
-        sha, started = run["head_sha"], parse_time(run["created_at"])
+        sha = run["head_sha"]
         envs = [p["environment"]["name"] for p in self.gh.get(f"{base}/pending_deployments")]
-
-        approvers = {a["user"]["login"] for a in self.gh.get(f"{base}/approvals") if a["state"] == "approved"}
         prs = self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/pulls")
-        for pr in prs:
-            approvers |= self.comment_approvers(repo, pr["number"], APPROVE_DEPLOY, started)
-
-        break_glass = [
-            BreakGlass(i["number"], parse_time(i["created_at"]),
-                       self.comment_approvers(repo, i["number"], APPROVE_BREAK_GLASS, parse_time(i["created_at"])))
-            for i in self.gh.paginate(f"/repos/{self.org}/{repo}/issues?labels=break-glass&state=open")
-            if sha in (i["body"] or "")
-        ]
         other_runs = [r["conclusion"] or r["status"]
                       for r in self.gh.paginate(f"/repos/{self.org}/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
                       if r["id"] != run["id"]]
@@ -203,12 +187,14 @@ class Scanner:
                     break
 
         f = self.facts(repo, actor=run["triggering_actor"]["login"], sha=sha, branch=run["head_branch"],
-                       approvers=approvers, workflows=[w["path"] for w in run.get("referenced_workflows", [])],
+                       workflows=[w["path"] for w in run.get("referenced_workflows", [])],
                        checks={CHECK_NAME: check["conclusion"]} if check else {},
-                       other_runs=other_runs, break_glass=break_glass)
+                       other_runs=other_runs)
 
         for env in envs:
             sets = self.config.deploy_sets(repo, env)
+            f.env = env
+            f.changes = self.changes.find(repo, sha, env, self.now)
             f.attestations = self.attestations(repo, [sha, *(pr["head"]["sha"] for pr in prs)], sets)
             v = evaluate(sets, f, self.members, self.config.baseline.get("break_glass"))
             state = "approved" if v.passed else "rejected"
@@ -254,7 +240,8 @@ def main():
 
     gh = GitHub()
     config = Config.from_dir(args.config_dir) if args.config_dir else Config.from_github(gh, args.org)
-    Scanner(gh, args.org, config, args.app_slug, args.dry_run).run()
+    changes = GitChanges(gh, args.org, config.change_management["repo"])
+    Scanner(gh, args.org, config, changes, args.app_slug, args.dry_run).run()
 
 
 if __name__ == "__main__":

@@ -5,13 +5,11 @@ baseline sets and adds its own from the manifest. All selected sets must pass.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from itertools import permutations
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-APPROVE_DEPLOY = "/approve-deploy"
-APPROVE_BREAK_GLASS = "/approve-break-glass"
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
@@ -29,16 +27,19 @@ class Facts:
     workflows: list[str] = field(default_factory=list)  # reusable workflows used, "owner/repo/path@ref"
     checks: dict[str, str] = field(default_factory=dict)  # check name -> conclusion
     other_runs: list[str] = field(default_factory=list)  # conclusions of other workflow runs on the commit
-    break_glass: list["BreakGlass"] = field(default_factory=list)
+    env: str = ""  # deploys only
+    changes: list["Change"] = field(default_factory=list)  # change requests covering this deploy
     # "signer_workflow|predicate_type" -> predicate of a verified attestation, or None
     attestations: dict[str, dict | None] = field(default_factory=dict)
 
 
 @dataclass
-class BreakGlass:
-    issue: int
-    created_at: datetime
+class Change:
+    id: str  # where the change lives, e.g. changes/payments-web/x.yaml
+    url: str  # where its approvals can be seen
+    author: str  # never counts as an approver
     approvers: set[str]
+    emergency: bool
 
 
 @dataclass
@@ -84,6 +85,15 @@ def _approvals_if_changed(f: Facts, p: dict, members: Members) -> str | None:
         return None
     reason = _approvals(f, p, members)
     return reason and f"Changes under {', '.join(p['paths'])}: {reason[0].lower()}{reason[1:]}"
+
+
+def _change_approved(f: Facts, p: dict, members: Members) -> str | None:
+    if not f.changes:
+        return f"No approved change request covers {f.sha[:7]} to {f.env} now"
+    if any(slots_filled(p["slots"], c.approvers - {f.actor, c.author}, f.team, members) for c in f.changes):
+        return None
+    need = " and ".join(" or ".join(s) for s in p["slots"]).format(team=f.team.removeprefix("team-"))
+    return f"Change {', '.join(c.url for c in f.changes)} needs approval from {need}"
 
 
 def _manifest_active(f: Facts, p: dict, members: Members) -> str | None:
@@ -133,6 +143,7 @@ def _attested(f: Facts, p: dict, members: Members) -> str | None:
 
 RULES = {
     "attested": _attested,
+    "change_approved": _change_approved,
     "approvals": _approvals,
     "approvals_if_changed": _approvals_if_changed,
     "manifest_active": _manifest_active,
@@ -157,7 +168,7 @@ def _run(rs: RuleSet, f: Facts, members: Members) -> list[str]:
 def evaluate(
     rulesets: list[RuleSet], f: Facts, members: Members, break_glass: dict | None = None
 ) -> Verdict:
-    """break_glass: {"slots": [...], "ttl_hours": n}. None means no override is possible."""
+    """break_glass: {"slots": [...]}, the approvals an emergency change needs to override soft rule sets."""
     hard, soft = [], []
     for rs in rulesets:
         (soft if rs.break_glass else hard).extend(_run(rs, f, members))
@@ -166,11 +177,8 @@ def evaluate(
     if not soft:
         return Verdict(True)
     if break_glass:
-        ttl = timedelta(hours=break_glass["ttl_hours"])
-        for bg in f.break_glass:
-            if f.now - bg.created_at <= ttl and slots_filled(break_glass["slots"], bg.approvers - {f.actor}, f.team, members):
-                return Verdict(True, soft + [f"Overridden by break-glass issue #{bg.issue}"])
-        soft.append(
-            f"To override, open an issue labelled break-glass naming {f.sha}, approved with {APPROVE_BREAK_GLASS}"
-        )
+        for c in f.changes:
+            if c.emergency and slots_filled(break_glass["slots"], c.approvers - {f.actor, c.author}, f.team, members):
+                return Verdict(True, soft + [f"Overridden by emergency change {c.url}"])
+        soft.append("To override, merge an emergency change request with break-glass approvals")
     return Verdict(False, soft)
