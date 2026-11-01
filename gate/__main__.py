@@ -216,7 +216,7 @@ class Scanner:
             print(f"deploy {repo} run {run['id']} {env} {state}\n{summary}")
             if self.dry_run:
                 continue
-            # The protection rule comment is easy to miss, so the full report also goes on the commit.
+            # The comment is capped at 1024 characters, so the full report with links goes on the commit.
             check = self.gh.post(f"/repos/{self.org}/{repo}/check-runs", {
                 "name": f"deploy-policy ({env})", "head_sha": sha, "status": "completed",
                 "conclusion": "success" if v.passed else "failure", "details_url": run["html_url"],
