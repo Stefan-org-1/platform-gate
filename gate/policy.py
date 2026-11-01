@@ -112,7 +112,8 @@ def _deploy_window(f: Facts, p: dict, members: Members) -> str | None:
     day = DAYS[local.weekday()]
     for block in p["blocked"]:
         if day in block["days"] and local.time() >= time.fromisoformat(block.get("after", "00:00")):
-            return f"Deploys are blocked {', '.join(block['days'])} after {block.get('after', '00:00')} {p['timezone']}"
+            when = f" after {block['after']} {p['timezone']}" if "after" in block else f" ({p['timezone']})"
+            return f"Deploys are blocked on {', '.join(block['days'])}{when}"
     return None
 
 
