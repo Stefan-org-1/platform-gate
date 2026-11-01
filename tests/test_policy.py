@@ -29,7 +29,7 @@ BREAK_GLASS = {"slots": [["sentinels-{team}"], ["managers-{team}"]]}
 
 
 def facts(**kw):
-    base = dict(repo="payments-web", team="team-payments", actor="dev", sha=HEAD, now=WED_NOON,
+    base = dict(org="org", repo="payments-web", team="team-payments", actor="dev", sha=HEAD, now=WED_NOON,
                 manifest_status="active", branch="main", workflows=[f"{TEMPLATE}@refs/tags/v1"],
                 checks={"policy": "success"})
     return Facts(**{**base, **kw})
@@ -84,8 +84,9 @@ class Merge(unittest.TestCase):
         self.assertFalse(evaluate([WORKFLOW_SENTINEL], f, members).passed)
 
 
-def change(approvers, author="requester", emergency=False):
-    return Change("changes/payments-web/x.yaml", "https://example.com/pr/1", author, set(approvers), emergency)
+def change(approvers, author="requester", emergency=False, misses=()):
+    return Change("changes/payments-web/x.yaml", "https://example.com/x.yaml", author, set(approvers), emergency,
+                  list(misses))
 
 
 class Deploy(unittest.TestCase):
@@ -100,7 +101,23 @@ class Deploy(unittest.TestCase):
     def test_no_change_fails(self):
         v = self.deploy()
         self.assertFalse(v.passed)
-        self.assertIn("No approved change request", v.reasons[0])
+        self.assertIn("No change request covers", v.reasons[0])
+
+    def test_change_that_misses_is_explained(self):
+        v = self.deploy(changes=[change({"sen", "mgr"}, misses=["version is bbbbbbb, not aaaaaaa"])])
+        self.assertFalse(v.passed)
+        self.assertIn("x.yaml): version is bbbbbbb, not aaaaaaa", v.reasons[0])
+
+    def test_each_approver_explained(self):
+        v = self.deploy(actor="sen", changes=[change({"sen", "requester", "outsider"})])
+        reason = v.reasons[0]
+        self.assertIn("sen does not count: started this deploy", reason)
+        self.assertIn("requester does not count: requested the change", reason)
+        self.assertIn("outsider does not count: not in managers-payments or sentinels-payments", reason)
+
+    def test_pass_names_who_approved(self):
+        v = self.deploy(changes=[change({"sen", "mgr"})])
+        self.assertIn("mgr counts for managers-payments; sen counts for sentinels-payments", v.notes[0])
 
     def test_missing_second_approver_fails(self):
         self.assertFalse(self.deploy(changes=[change({"sen"})]).passed)
@@ -126,7 +143,20 @@ class Deploy(unittest.TestCase):
         self.assertIn("Overridden by emergency change", v.reasons[-1])
 
     def test_normal_change_does_not_override(self):
-        self.assertFalse(self.deploy(now=FRI_EVENING, changes=[change({"sen", "mgr"})]).passed)
+        v = self.deploy(now=FRI_EVENING, changes=[change({"sen", "mgr"})])
+        self.assertFalse(v.passed)
+        self.assertIn("To override, request an emergency change", v.reasons[-1])
+
+    def test_emergency_change_short_of_break_glass_is_explained(self):
+        f = facts(env="prod", now=FRI_EVENING, actor="sen", changes=[change({"sen", "mgr"}, emergency=True)])
+        v = evaluate([WINDOW], f, members, BREAK_GLASS)
+        self.assertFalse(v.passed)
+        self.assertIn("Emergency change cannot override", v.reasons[-1])
+        self.assertIn("sen does not count: started this deploy", v.reasons[-1])
+
+    def test_emergency_change_that_misses_does_not_override(self):
+        v = self.deploy(now=FRI_EVENING, changes=[change({"sen", "mgr"}, emergency=True, misses=["window ended"])])
+        self.assertFalse(v.passed)
 
     def test_hotfix_branch_needs_emergency_change(self):
         self.assertFalse(self.deploy(branch="hotfix", checks={}, changes=[change({"sen", "mgr"})]).passed)

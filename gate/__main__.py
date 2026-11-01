@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import urllib.error
@@ -19,7 +20,7 @@ import yaml
 
 from .changes import ChangeSource, FileChanges
 from .github import GitHub
-from .policy import Facts, RuleSet, attestation_key, current_approvers, evaluate
+from .policy import Facts, RuleSet, Verdict, attestation_key, current_approvers, evaluate
 
 CHECK_NAME = "policy"
 
@@ -31,14 +32,21 @@ def gate_run_url() -> str | None:
     return f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
 
 
-def report(org: str, reasons: list[str], sets: list[RuleSet], links: dict[str, str]) -> str:
-    """Markdown body: reasons, links, and the rule sets that were checked."""
-    lines = [f"- {r}" for r in reasons] or ["All rule sets pass."]
+def ruleset_url(org: str, name: str) -> str:
+    return f"https://github.com/{org}/org-config/blob/main/rulesets/{name}.yaml"
+
+
+def report(org: str, v: Verdict, sets: list[RuleSet], links: dict[str, str]) -> str:
+    """Markdown body: reasons, how passing rules were met, links, and the rule sets checked."""
+    # "[set] reason" -> "[set](link to its definition) reason"
+    linked = lambda r: re.sub(r"^\[([\w-]+)\]", lambda m: f"[{m[1]}]({ruleset_url(org, m[1])})", r)
+    lines = [f"- {linked(r)}" for r in v.reasons] or ["All rule sets pass."]
+    lines += [f"- {linked(n)}" for n in v.notes]
     present = [f"{name}: {url}" for name, url in links.items() if url]
     lines += ["", *present] if present else []
     lines.append("")
     lines.append("Rule sets checked: " + ", ".join(
-        f"[{rs.name}](https://github.com/{org}/org-config/blob/main/rulesets/{rs.name}.yaml)" for rs in sets))
+        f"[{rs.name}]({ruleset_url(org, rs.name)})" for rs in sets))
     return "\n".join(lines)
 
 
@@ -129,7 +137,7 @@ class Scanner:
 
     def facts(self, repo: str, **kw) -> Facts:
         entry = self.config.repos.get(repo, {})
-        return Facts(repo=repo, team=entry.get("team", ""), manifest_status=entry.get("status"), now=self.now, **kw)
+        return Facts(org=self.org, repo=repo, team=entry.get("team", ""), manifest_status=entry.get("status"), now=self.now, **kw)
 
     def attestations(self, repo: str, shas: list[str], rulesets: list[RuleSet]) -> dict[str, dict | None]:
         """For each attested rule, the first of the given commits with a verified attestation."""
@@ -157,7 +165,7 @@ class Scanner:
         v = evaluate(sets, f, self.members)
         conclusion = "success" if v.passed else "failure"
         # No per-run links here: an unchanged summary is how a repeat post is skipped.
-        summary = report(self.org, v.reasons, sets, {})
+        summary = report(self.org, v, sets, {})
         print(f"merge  {repo}#{pr['number']} {sha[:7]} {conclusion}\n{summary}")
         if self.dry_run:
             return
@@ -197,10 +205,11 @@ class Scanner:
             sets = self.config.deploy_sets(repo, env)
             f.env = env
             f.changes = self.changes.find(repo, sha, env, self.now)
+            f.changes_url = self.changes.location(repo)
             f.attestations = self.attestations(repo, [sha, *(pr["head"]["sha"] for pr in prs)], sets)
             v = evaluate(sets, f, self.members, self.config.baseline.get("break_glass"))
             state = "approved" if v.passed else "rejected"
-            summary = report(self.org, v.reasons, sets, {"Deploy run": run["html_url"], "Gate run": gate_run_url()})
+            summary = report(self.org, v, sets, {"Deploy run": run["html_url"], "Gate run": gate_run_url()})
             print(f"deploy {repo} run {run['id']} {env} {state}\n{summary}")
             if self.dry_run:
                 continue
@@ -210,7 +219,8 @@ class Scanner:
                 "conclusion": "success" if v.passed else "failure", "details_url": run["html_url"],
                 "output": {"title": f"Deploy to {env} {state}", "summary": summary},
             })
-            comment = "\n".join(f"- {r}" for r in v.reasons) or "All rule sets pass."
+            comment = "\n".join([*(f"- {r}" for r in v.reasons), *(["All rule sets pass."] if not v.reasons else []),
+                                 *(f"- {n}" for n in v.notes)])
             comment = f"Details: {check['html_url']}\n{comment}"
             try:
                 self.gh.post(f"{base}/deployment_protection_rule",

@@ -15,6 +15,7 @@ DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 @dataclass
 class Facts:
+    org: str
     repo: str
     team: str  # owning team slug from the manifest, e.g. team-payments
     actor: str  # PR author or deploy trigger; never counts as an approver
@@ -28,7 +29,8 @@ class Facts:
     checks: dict[str, str] = field(default_factory=dict)  # check name -> conclusion
     other_runs: list[str] = field(default_factory=list)  # conclusions of other workflow runs on the commit
     env: str = ""  # deploys only
-    changes: list["Change"] = field(default_factory=list)  # change requests covering this deploy
+    changes: list["Change"] = field(default_factory=list)  # the repo's change requests
+    changes_url: str = ""  # where the repo's change requests live
     # "signer_workflow|predicate_type" -> predicate of a verified attestation, or None
     attestations: dict[str, dict | None] = field(default_factory=dict)
 
@@ -40,6 +42,7 @@ class Change:
     author: str  # never counts as an approver
     approvers: set[str]
     emergency: bool
+    misses: list[str] = field(default_factory=list)  # why it does not cover this deploy; empty if it does
 
 
 @dataclass
@@ -53,6 +56,7 @@ class RuleSet:
 class Verdict:
     passed: bool
     reasons: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # how passing rules were met, for tracing
 
 
 Members = Callable[[str], set[str]]
@@ -74,10 +78,38 @@ def slots_filled(slots: list[list[str]], approvers: set[str], team: str, members
     return any(all(p in e for p, e in zip(people, eligible)) for people in permutations(approvers, len(slots)))
 
 
+def _groups(slots: list[list[str]], team: str) -> list[list[str]]:
+    area = team.removeprefix("team-")
+    return [[g.format(team=area) for g in slot] for slot in slots]
+
+
+def _need(f: Facts, slots: list[list[str]]) -> str:
+    """Slots as text, each group linked to its team page."""
+    link = lambda g: f"[{g}](https://github.com/orgs/{f.org}/teams/{g})"
+    return " and ".join(" or ".join(link(g) for g in slot) for slot in _groups(slots, f.team))
+
+
+def _who_counts(approvers: set[str], excluded: dict[str, str], slots: list[list[str]], f: Facts,
+                members: Members) -> str:
+    """Whether each approver counts, and why. excluded: login -> why they never count."""
+    groups = sorted({g for slot in _groups(slots, f.team) for g in slot})
+    notes = []
+    for a in sorted(approvers):
+        inside = [g for g in groups if a in members(g)]
+        if a in excluded:
+            notes.append(f"{a} does not count: {excluded[a]}")
+        elif inside:
+            notes.append(f"{a} counts for {', '.join(inside)}")
+        else:
+            notes.append(f"{a} does not count: not in {' or '.join(groups)}")
+    return "Approvers: " + ("; ".join(notes) if notes else "none")
+
+
 def _approvals(f: Facts, p: dict, members: Members) -> str | None:
     if slots_filled(p["slots"], f.approvers - {f.actor}, f.team, members):
         return None
-    return "Needs approval from " + " and ".join(" or ".join(s) for s in p["slots"]).format(team=f.team.removeprefix("team-"))
+    who = _who_counts(f.approvers, {f.actor: "opened the PR"}, p["slots"], f, members)
+    return f"Needs approval from {_need(f, p['slots'])}. {who}"
 
 
 def _approvals_if_changed(f: Facts, p: dict, members: Members) -> str | None:
@@ -87,13 +119,40 @@ def _approvals_if_changed(f: Facts, p: dict, members: Members) -> str | None:
     return reason and f"Changes under {', '.join(p['paths'])}: {reason[0].lower()}{reason[1:]}"
 
 
+def covering(f: Facts) -> list[Change]:
+    return [c for c in f.changes if not c.misses]
+
+
+def _excluded(c: Change, f: Facts) -> dict[str, str]:
+    # The deployer wins when one person is both, since that is the rule that applies to this deploy.
+    return {c.author: "requested the change", f.actor: "started this deploy"}
+
+
+def _change_filled(c: Change, slots: list[list[str]], f: Facts, members: Members) -> bool:
+    return slots_filled(slots, c.approvers - _excluded(c, f).keys(), f.team, members)
+
+
+def _change_explained(c: Change, slots: list[list[str]], f: Facts, members: Members) -> str:
+    return f"[{c.id}]({c.url}). {_who_counts(c.approvers, _excluded(c, f), slots, f, members)}"
+
+
 def _change_approved(f: Facts, p: dict, members: Members) -> str | None:
-    if not f.changes:
-        return f"No approved change request covers {f.sha[:7]} to {f.env} now"
-    if any(slots_filled(p["slots"], c.approvers - {f.actor, c.author}, f.team, members) for c in f.changes):
+    found = covering(f)
+    if not found:
+        lines = [f"No change request covers {f.sha[:7]} to {f.env} at {f.now:%Y-%m-%d %H:%M} UTC. "
+                 f"Request one in [changes for {f.repo}]({f.changes_url})"]
+        lines += [f"[{c.id}]({c.url}): {'; '.join(c.misses)}" for c in f.changes]
+        return "\n  - ".join(lines)
+    if any(_change_filled(c, p["slots"], f, members) for c in found):
         return None
-    need = " and ".join(" or ".join(s) for s in p["slots"]).format(team=f.team.removeprefix("team-"))
-    return f"Change {', '.join(c.url for c in f.changes)} needs approval from {need}"
+    lines = [f"Change needs approval from {_need(f, p['slots'])}"]
+    lines += [_change_explained(c, p["slots"], f, members) for c in found]
+    return "\n  - ".join(lines)
+
+
+def _change_approved_note(f: Facts, p: dict, members: Members) -> str:
+    c = next(c for c in covering(f) if _change_filled(c, p["slots"], f, members))
+    return f"Approved by change {_change_explained(c, p['slots'], f, members)}"
 
 
 def _manifest_active(f: Facts, p: dict, members: Members) -> str | None:
@@ -141,6 +200,9 @@ def _attested(f: Facts, p: dict, members: Members) -> str | None:
     return None
 
 
+# Rules whose pass is worth explaining: name -> function giving the note.
+NOTES = {"change_approved": _change_approved_note}
+
 RULES = {
     "attested": _attested,
     "change_approved": _change_approved,
@@ -155,13 +217,15 @@ RULES = {
 }
 
 
-def _run(rs: RuleSet, f: Facts, members: Members) -> list[str]:
+def _run(rs: RuleSet, f: Facts, members: Members, notes: list[str]) -> list[str]:
     reasons = []
     for rule in rs.rules:
         name, params = next(iter(rule.items())) if isinstance(rule, dict) else (rule, {})
         reason = RULES[name](f, params or {}, members)
         if reason:
             reasons.append(f"[{rs.name}] {reason}")
+        elif name in NOTES:
+            notes.append(f"[{rs.name}] {NOTES[name](f, params or {}, members)}")
     return reasons
 
 
@@ -169,16 +233,24 @@ def evaluate(
     rulesets: list[RuleSet], f: Facts, members: Members, break_glass: dict | None = None
 ) -> Verdict:
     """break_glass: {"slots": [...]}, the approvals an emergency change needs to override soft rule sets."""
-    hard, soft = [], []
+    hard, soft, notes = [], [], []
     for rs in rulesets:
-        (soft if rs.break_glass else hard).extend(_run(rs, f, members))
+        (soft if rs.break_glass else hard).extend(_run(rs, f, members, notes))
     if hard:
-        return Verdict(False, hard + soft)
+        return Verdict(False, hard + soft, notes)
     if not soft:
-        return Verdict(True)
+        return Verdict(True, notes=notes)
     if break_glass:
-        for c in f.changes:
-            if c.emergency and slots_filled(break_glass["slots"], c.approvers - {f.actor, c.author}, f.team, members):
-                return Verdict(True, soft + [f"Overridden by emergency change {c.url}"])
-        soft.append("To override, merge an emergency change request with break-glass approvals")
-    return Verdict(False, soft)
+        slots = break_glass["slots"]
+        emergencies = [c for c in covering(f) if c.emergency]
+        for c in emergencies:
+            if _change_filled(c, slots, f, members):
+                return Verdict(True, soft + [f"Overridden by emergency change {_change_explained(c, slots, f, members)}"],
+                               notes)
+        for c in emergencies:
+            soft.append(f"Emergency change cannot override: needs {_need(f, slots)}\n"
+                        f"  - {_change_explained(c, slots, f, members)}")
+        if not emergencies:
+            soft.append(f"To override, request an emergency change with break-glass approvals in "
+                        f"[changes for {f.repo}]({f.changes_url})")
+    return Verdict(False, soft, notes)

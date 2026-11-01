@@ -1,7 +1,7 @@
 """Change requests: approved deploys of a version to environments within a time window.
 
-The gate asks a ChangeSource which changes cover a deploy. A Jira or ServiceNow source would
-implement the same find().
+The gate asks a ChangeSource for a repo's changes, each with why it does not cover the deploy,
+if it does not. A Jira or ServiceNow source would implement the same interface.
 """
 
 import base64
@@ -18,14 +18,27 @@ from .policy import Change
 class ChangeSource(Protocol):
     def find(self, repo: str, sha: str, env: str, now: datetime) -> list[Change]: ...
 
+    def location(self, repo: str) -> str:
+        """Where an engineer finds and requests changes for the repo."""
+
 
 def as_time(v) -> datetime:
     return v if isinstance(v, datetime) else datetime.fromisoformat(str(v))
 
 
-def covers(doc: dict, sha: str, env: str, now: datetime) -> bool:
-    w = doc["window"]
-    return doc["version"] == sha and env in doc["environments"] and as_time(w["start"]) <= now <= as_time(w["end"])
+def misses(doc: dict, sha: str, env: str, now: datetime) -> list[str]:
+    """Why the change does not cover deploying sha to env now. Empty if it does."""
+    start, end = as_time(doc["window"]["start"]), as_time(doc["window"]["end"])
+    out = []
+    if doc["version"] != sha:
+        out.append(f"version is {doc['version'][:7]}, not {sha[:7]}")
+    if env not in doc["environments"]:
+        out.append(f"environments are {', '.join(doc['environments'])}, not {env}")
+    if now < start:
+        out.append(f"window starts {start.isoformat()}")
+    elif now > end:
+        out.append(f"window ended {end.isoformat()}")
+    return out
 
 
 class FileChanges:
@@ -36,6 +49,10 @@ class FileChanges:
 
     def __init__(self, gh: GitHub, org: str, repo: str):
         self.gh, self.base = gh, f"/repos/{org}/{repo}"
+        self.html = f"https://github.com/{org}/{repo}"
+
+    def location(self, repo: str) -> str:
+        return f"{self.html}/tree/main/changes/{repo}"
 
     def find(self, repo: str, sha: str, env: str, now: datetime) -> list[Change]:
         try:
@@ -50,7 +67,6 @@ class FileChanges:
                 continue
             # Not download_url: raw.githubusercontent.com may serve a copy minutes old.
             doc = yaml.safe_load(base64.b64decode(self.gh.get(f["url"])["content"]))
-            if covers(doc, sha, env, now):
-                found.append(Change(f["path"], f["html_url"], doc["requested_by"], set(doc["approvers"]),
-                                    doc["emergency"]))
+            found.append(Change(f["path"], f["html_url"], doc["requested_by"], set(doc["approvers"]),
+                                doc["emergency"], misses(doc, sha, env, now)))
         return found
