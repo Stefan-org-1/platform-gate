@@ -24,7 +24,7 @@ Rule types are in `gate/policy.py`. Change requests are read in `gate/changes.py
 | Merge | `policy` check on the PR | Same check |
 | Deploy | Comment in the deploy run's summary | `deploy-policy (<env>)` check on the commit |
 
-Each reason names its rule set, links to its definition, and says why it failed.
+Results list what was not met and how the rest was met. Each line names its rule set, links to its definition, and says why.
 
 ## Run locally
 
