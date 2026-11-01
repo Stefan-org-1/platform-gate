@@ -196,6 +196,15 @@ class Scanner:
         return [b for b in branches
                 if self.gh.get(f"/repos/{self.org}/{repo}/compare/{sha}...{b}")["behind_by"] == 0]
 
+    def deployed_to(self, repo: str, sha: str) -> list[str]:
+        """Environments where a deployment of sha last ended in success."""
+        envs = []
+        for d in self.gh.paginate(f"/repos/{self.org}/{repo}/deployments?sha={sha}"):
+            statuses = self.gh.get(f"/repos/{self.org}/{repo}/deployments/{d['id']}/statuses?per_page=1")
+            if statuses and statuses[0]["state"] == "success":
+                envs.append(d["environment"])
+        return envs
+
     def scan_deploy(self, repo: str, run: dict, envs: list[str] | None = None):
         """envs: evaluate as if waiting on these, instead of the run's pending deployments."""
         base = f"/repos/{self.org}/{repo}/actions/runs/{run['id']}"
@@ -217,6 +226,7 @@ class Scanner:
         tags = self.release_tags(repo, sha)
         f = self.facts(repo, actor=run["triggering_actor"]["login"], sha=sha, branch=run["head_branch"],
                        tags=tags, on_branches=self.release_branches_with(repo, sha) if tags else [],
+                       deployed_to=self.deployed_to(repo, sha),
                        workflows=[w["path"] for w in run.get("referenced_workflows", [])],
                        checks={CHECK_NAME: check["conclusion"]} if check else {},
                        other_runs=other_runs)

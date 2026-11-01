@@ -177,6 +177,17 @@ class ReleaseTag(unittest.TestCase):
         self.assertIn("not on main or a release/X.Y.z branch", v.reasons[0])
 
 
+class DeployedTo(unittest.TestCase):
+    sets = [RuleSet("staged", [{"deployed_to": {"environment": "staging"}}], break_glass=True)]
+
+    def test_deployed_to_staging_passes(self):
+        self.assertTrue(evaluate(self.sets, facts(deployed_to=["test", "staging"]), members).passed)
+
+    def test_not_deployed_fails(self):
+        v = evaluate(self.sets, facts(deployed_to=["test"]), members)
+        self.assertIn("has not been deployed to staging", v.reasons[0])
+
+
 class Attested(unittest.TestCase):
     params = {"signer_workflows": ["Stefan-org-1/ci-templates/.github/workflows/scan.yml"],
               "predicate_type": "https://example.com/scan/v1", "require": {"secret_scan": "pass"}}
