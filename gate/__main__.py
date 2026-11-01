@@ -17,7 +17,7 @@ from functools import cache
 
 import yaml
 
-from .changes import ChangeSource, GitChanges
+from .changes import ChangeSource, FileChanges
 from .github import GitHub
 from .policy import Facts, RuleSet, attestation_key, current_approvers, evaluate
 
@@ -240,7 +240,9 @@ def main():
 
     gh = GitHub()
     config = Config.from_dir(args.config_dir) if args.config_dir else Config.from_github(gh, args.org)
-    changes = GitChanges(gh, args.org, config.change_management["repo"])
+    if config.change_management["source"] != "file":
+        raise SystemExit(f"Unknown change source {config.change_management['source']}")
+    changes = FileChanges(gh, args.org, config.change_management["repo"])
     Scanner(gh, args.org, config, changes, args.app_slug, args.dry_run).run()
 
 
