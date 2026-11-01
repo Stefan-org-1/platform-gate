@@ -24,7 +24,7 @@ jobs:
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
         with:
-          app-id: ${{ vars.GATE_APP_ID }}
+          client-id: ${{ vars.GATE_APP_CLIENT_ID }}
           private-key: ${{ secrets.GATE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
       - run: python -m gate --org "$ORG" --app-slug "$APP_SLUG"
