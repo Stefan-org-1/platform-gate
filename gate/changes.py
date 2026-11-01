@@ -16,7 +16,8 @@ from .policy import Change
 
 
 class ChangeSource(Protocol):
-    def find(self, repo: str, sha: str, env: str, now: datetime) -> list[Change]: ...
+    def find(self, repo: str, sha: str, tags: list[str], env: str, now: datetime) -> list[Change]:
+        """tags: release tags on sha. A change may name the version by either."""
 
     def location(self, repo: str) -> str:
         """Where an engineer finds and requests changes for the repo."""
@@ -26,12 +27,14 @@ def as_time(v) -> datetime:
     return v if isinstance(v, datetime) else datetime.fromisoformat(str(v))
 
 
-def misses(doc: dict, sha: str, env: str, now: datetime) -> list[str]:
-    """Why the change does not cover deploying sha to env now. Empty if it does."""
+def misses(doc: dict, sha: str, tags: list[str], env: str, now: datetime) -> list[str]:
+    """Why the change does not cover deploying sha, tagged tags, to env now. Empty if it does."""
     start, end = as_time(doc["window"]["start"]), as_time(doc["window"]["end"])
     out = []
-    if doc["version"] != sha:
-        out.append(f"version is {doc['version'][:7]}, not {sha[:7]}")
+    version = str(doc["version"])
+    if version != sha and version not in tags:
+        shown = lambda v: v[:7] if len(v) == 40 else v
+        out.append(f"version is {shown(version)}, not {' or '.join([sha[:7], *tags])}")
     if env not in doc["environments"]:
         out.append(f"environments are {', '.join(doc['environments'])}, not {env}")
     if now < start:
@@ -54,7 +57,7 @@ class FileChanges:
     def location(self, repo: str) -> str:
         return f"{self.html}/tree/main/changes/{repo}"
 
-    def find(self, repo: str, sha: str, env: str, now: datetime) -> list[Change]:
+    def find(self, repo: str, sha: str, tags: list[str], env: str, now: datetime) -> list[Change]:
         try:
             files = self.gh.get(f"{self.base}/contents/changes/{repo}?ref=main")
         except urllib.error.HTTPError as e:
@@ -68,5 +71,5 @@ class FileChanges:
             # Not download_url: raw.githubusercontent.com may serve a copy minutes old.
             doc = yaml.safe_load(base64.b64decode(self.gh.get(f["url"])["content"]))
             found.append(Change(f["path"], f["html_url"], doc["requested_by"], set(doc["approvers"]),
-                                doc["emergency"], misses(doc, sha, env, now)))
+                                doc["emergency"], misses(doc, sha, tags, env, now)))
         return found

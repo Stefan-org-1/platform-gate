@@ -13,6 +13,6 @@ class LoadsOrgConfig(unittest.TestCase):
         self.assertTrue(config.deploy_sets("payments-web", "prod"))
 
     def test_unknown_rule_set_is_rejected(self):
-        files = {"baseline.yaml": "merge: [nope]\ndeploy: []\n", "change-management.yaml": "source: file\nrepo: x\n"}
+        files = {"baseline.yaml": "merge: [nope]\ndeploy: {all: []}\n", "change-management.yaml": "source: file\nrepo: x\n"}
         with self.assertRaises(ValueError):
             Config(files)

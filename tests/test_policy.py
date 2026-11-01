@@ -162,6 +162,21 @@ class Deploy(unittest.TestCase):
         self.assertFalse(self.deploy(branch="hotfix", checks={}, changes=[change({"sen", "mgr"})]).passed)
 
 
+class ReleaseTag(unittest.TestCase):
+    sets = [RuleSet("released", ["release_tag"])]
+
+    def test_tagged_on_main_passes(self):
+        self.assertTrue(evaluate(self.sets, facts(tags=["1.0.0"], on_branches=["main"]), members).passed)
+
+    def test_untagged_fails(self):
+        v = evaluate(self.sets, facts(), members)
+        self.assertIn("has no release tag", v.reasons[0])
+
+    def test_tag_off_release_branches_fails(self):
+        v = evaluate(self.sets, facts(tags=["1.0.0"]), members)
+        self.assertIn("not on main or a release/X.Y.z branch", v.reasons[0])
+
+
 class Attested(unittest.TestCase):
     params = {"signer_workflows": ["Stefan-org-1/ci-templates/.github/workflows/scan.yml"],
               "predicate_type": "https://example.com/scan/v1", "require": {"secret_scan": "pass"}}

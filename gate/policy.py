@@ -22,7 +22,9 @@ class Facts:
     sha: str
     now: datetime
     manifest_status: str | None = None
-    branch: str = ""
+    branch: str = ""  # branch or tag the run was started from
+    tags: list[str] = field(default_factory=list)  # release tags (X.Y.Z) on the commit
+    on_branches: list[str] = field(default_factory=list)  # release branches (main, release/*) that contain the commit
     files: list[str] = field(default_factory=list)
     approvers: set[str] = field(default_factory=set)
     workflows: list[str] = field(default_factory=list)  # reusable workflows used, "owner/repo/path@ref"
@@ -167,6 +169,14 @@ def _from_branch(f: Facts, p: dict, members: Members) -> str | None:
     return None if f.branch == p["branch"] else f"Deploying from {f.branch}, not {p['branch']}"
 
 
+def _release_tag(f: Facts, p: dict, members: Members) -> str | None:
+    if not f.tags:
+        return f"{f.sha[:7]} has no release tag (X.Y.Z). Cut a release with ci-templates release.yml"
+    if not f.on_branches:
+        return f"{', '.join(f.tags)} is on {f.sha[:7]}, which is not on main or a release/X.Y.z branch"
+    return None
+
+
 def _check_passed(f: Facts, p: dict, members: Members) -> str | None:
     return None if f.checks.get(p["name"]) == "success" else f"Check {p['name']} has not passed on {f.sha[:7]}"
 
@@ -211,6 +221,7 @@ RULES = {
     "manifest_active": _manifest_active,
     "central_template": _central_template,
     "from_branch": _from_branch,
+    "release_tag": _release_tag,
     "check_passed": _check_passed,
     "pipeline_green": _pipeline_green,
     "deploy_window": _deploy_window,

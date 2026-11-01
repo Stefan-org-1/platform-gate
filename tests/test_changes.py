@@ -11,26 +11,34 @@ INSIDE = datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc)  # 10:00 Toronto
 
 class Misses(unittest.TestCase):
     def test_matching_deploy(self):
-        self.assertEqual(misses(DOC, SHA, "prod-eu", INSIDE), [])
+        self.assertEqual(misses(DOC, SHA, [], "prod-eu", INSIDE), [])
 
     def test_other_version(self):
-        self.assertEqual(misses(DOC, "b" * 40, "prod-eu", INSIDE), ["version is aaaaaaa, not bbbbbbb"])
+        self.assertEqual(misses(DOC, "b" * 40, [], "prod-eu", INSIDE), ["version is aaaaaaa, not bbbbbbb"])
 
     def test_other_environment(self):
-        self.assertEqual(misses(DOC, SHA, "prod-ap", INSIDE), ["environments are prod-us, prod-eu, not prod-ap"])
+        self.assertEqual(misses(DOC, SHA, [], "prod-ap", INSIDE), ["environments are prod-us, prod-eu, not prod-ap"])
 
     def test_before_window(self):
-        self.assertEqual(misses(DOC, SHA, "prod-eu", datetime(2026, 11, 2, 13, 0, tzinfo=timezone.utc)),
+        self.assertEqual(misses(DOC, SHA, [], "prod-eu", datetime(2026, 11, 2, 13, 0, tzinfo=timezone.utc)),
                          ["window starts 2026-11-02T09:00:00-05:00"])
 
     def test_after_window(self):
-        self.assertEqual(misses(DOC, SHA, "prod-eu", datetime(2026, 11, 2, 23, 0, tzinfo=timezone.utc)),
+        self.assertEqual(misses(DOC, SHA, [], "prod-eu", datetime(2026, 11, 2, 23, 0, tzinfo=timezone.utc)),
                          ["window ended 2026-11-02T17:00:00-05:00"])
 
     def test_yaml_parsed_timestamps(self):
         doc = {**DOC, "window": {"start": datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc),
                                  "end": datetime(2026, 11, 2, 22, 0, tzinfo=timezone.utc)}}
-        self.assertEqual(misses(doc, SHA, "prod-eu", INSIDE), [])
+        self.assertEqual(misses(doc, SHA, [], "prod-eu", INSIDE), [])
+
+
+    def test_version_by_release_tag(self):
+        self.assertEqual(misses({**DOC, "version": "1.2.0"}, "b" * 40, ["1.2.0"], "prod-eu", INSIDE), [])
+
+    def test_other_release(self):
+        self.assertEqual(misses({**DOC, "version": "1.2.0"}, "b" * 40, ["1.3.0"], "prod-eu", INSIDE),
+                         ["version is 1.2.0, not bbbbbbb or 1.3.0"])
 
 
 if __name__ == "__main__":

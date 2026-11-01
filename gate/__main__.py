@@ -23,6 +23,8 @@ from .github import GitHub
 from .policy import Facts, RuleSet, Verdict, attestation_key, current_approvers, evaluate
 
 CHECK_NAME = "policy"
+RELEASE_TAG = re.compile(r"\d+\.\d+\.\d+")
+RELEASE_BRANCH = re.compile(r"release/\d+\.\d+\.z")
 
 
 def gate_run_url() -> str | None:
@@ -70,7 +72,9 @@ class Config:
                 raise ValueError(f"Unknown rule set {name}")
 
     def _all_set_names(self):
-        yield from self.baseline["merge"] + self.baseline["deploy"]
+        yield from self.baseline["merge"]
+        for names in self.baseline["deploy"].values():
+            yield from names
         for r in self.repos.values():
             sets = r.get("rulesets", {})
             yield from sets.get("merge", [])
@@ -83,7 +87,8 @@ class Config:
 
     def deploy_sets(self, repo: str, env: str) -> list[RuleSet]:
         own = self.repos.get(repo, {}).get("rulesets", {}).get("deploy", {}).get(env, [])
-        return [self.rulesets[n] for n in self.baseline["deploy"] + own]
+        base = self.baseline["deploy"]
+        return [self.rulesets[n] for n in base["all"] + base.get(env, []) + own]
 
     @classmethod
     def from_dir(cls, root: str):
@@ -180,6 +185,17 @@ class Scanner:
             "output": {"title": f"Policy {conclusion}", "summary": summary},
         })
 
+    def release_tags(self, repo: str, sha: str) -> list[str]:
+        return [t["name"] for t in self.gh.paginate(f"/repos/{self.org}/{repo}/tags")
+                if t["commit"]["sha"] == sha and RELEASE_TAG.fullmatch(t["name"])]
+
+    def release_branches_with(self, repo: str, sha: str) -> list[str]:
+        branches = [b["name"] for b in self.gh.paginate(f"/repos/{self.org}/{repo}/branches")
+                    if b["name"] == "main" or RELEASE_BRANCH.fullmatch(b["name"])]
+        # behind_by 0: the branch has every commit up to sha.
+        return [b for b in branches
+                if self.gh.get(f"/repos/{self.org}/{repo}/compare/{sha}...{b}")["behind_by"] == 0]
+
     def scan_deploy(self, repo: str, run: dict, envs: list[str] | None = None):
         """envs: evaluate as if waiting on these, instead of the run's pending deployments."""
         base = f"/repos/{self.org}/{repo}/actions/runs/{run['id']}"
@@ -198,7 +214,9 @@ class Scanner:
                 if check:
                     break
 
+        tags = self.release_tags(repo, sha)
         f = self.facts(repo, actor=run["triggering_actor"]["login"], sha=sha, branch=run["head_branch"],
+                       tags=tags, on_branches=self.release_branches_with(repo, sha) if tags else [],
                        workflows=[w["path"] for w in run.get("referenced_workflows", [])],
                        checks={CHECK_NAME: check["conclusion"]} if check else {},
                        other_runs=other_runs)
@@ -206,7 +224,7 @@ class Scanner:
         for env in envs:
             sets = self.config.deploy_sets(repo, env)
             f.env = env
-            f.changes = self.changes.find(repo, sha, env, self.now)
+            f.changes = self.changes.find(repo, sha, tags, env, self.now)
             f.changes_url = self.changes.location(repo)
             f.attestations = self.attestations(repo, [sha, *(pr["head"]["sha"] for pr in prs)], sets)
             v = evaluate(sets, f, self.members, self.config.baseline.get("break_glass"))
