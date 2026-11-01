@@ -160,7 +160,7 @@ def _change_approved_note(f: Facts, p: dict, members: Members) -> str:
 
 
 def _manifest_active(f: Facts, p: dict, members: Members) -> str | None:
-    return None if f.manifest_status == "active" else f"{f.repo} is not active in the org-config manifest"
+    return None if f.manifest_status == "active" else f"{f.repo} is not active in org-manifest"
 
 
 def _central_template(f: Facts, p: dict, members: Members) -> str | None:

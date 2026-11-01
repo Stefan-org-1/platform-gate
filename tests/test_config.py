@@ -3,13 +3,14 @@ import unittest
 
 from gate.__main__ import Config
 
-ORG_CONFIG = pathlib.Path(__file__).parents[2] / "org-config"
+LAB = pathlib.Path(__file__).parents[2]
+MANIFEST, POLICY = LAB / "org-manifest", LAB / "org-policy"
 
 
-@unittest.skipUnless(ORG_CONFIG.is_dir(), "org-config checkout not next to platform-gate")
+@unittest.skipUnless(MANIFEST.is_dir() and POLICY.is_dir(), "org-manifest and org-policy not next to platform-gate")
 class LoadsOrgConfig(unittest.TestCase):
     def test_every_named_rule_set_exists(self):
-        config = Config.from_dir(ORG_CONFIG)
+        config = Config.from_dirs(MANIFEST, POLICY)
         self.assertTrue(config.deploy_sets("payments-web", "prod"))
 
     def test_unknown_rule_set_is_rejected(self):

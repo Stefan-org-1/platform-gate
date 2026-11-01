@@ -35,7 +35,7 @@ def gate_run_url() -> str | None:
 
 
 def ruleset_url(org: str, name: str) -> str:
-    return f"https://github.com/{org}/org-config/blob/main/rulesets/{name}.yaml"
+    return f"https://github.com/{org}/org-policy/blob/main/rulesets/{name}.yaml"
 
 
 def sections(v: Verdict, fmt=lambda r: r) -> list[str]:
@@ -61,7 +61,7 @@ def report(org: str, v: Verdict, sets: list[RuleSet], links: dict[str, str]) -> 
 
 class Config:
     def __init__(self, files: dict[str, str]):
-        """files: path relative to the org-config root -> text."""
+        """files: path -> text, with org-policy files at their own paths and org-manifest files under repos/."""
         load = lambda p: yaml.safe_load(files[p])
         self.baseline = load("baseline.yaml")
         self.change_management = load("change-management.yaml")
@@ -98,17 +98,22 @@ class Config:
         return [self.rulesets[n] for n in base["all"] + base.get(env, []) + own]
 
     @classmethod
-    def from_dir(cls, root: str):
-        root = pathlib.Path(root)
-        return cls({str(p.relative_to(root)): p.read_text() for p in root.glob("**/*.yaml")})
+    def from_dirs(cls, manifest: str, policy: str):
+        files = {}
+        for root, dirs in ((manifest, ["repos"]), (policy, ["", "rulesets"])):
+            for d in dirs:
+                for p in pathlib.Path(root, d).glob("*.yaml"):
+                    files[str(p.relative_to(root))] = p.read_text()
+        return cls(files)
 
     @classmethod
     def from_github(cls, gh: GitHub, org: str):
         files = {}
-        for d in ("", "rulesets", "repos"):
-            for f in gh.get(f"/repos/{org}/org-config/contents/{d}"):
-                if f["type"] == "file" and f["name"].endswith(".yaml"):
-                    files[f["path"]] = base64.b64decode(gh.get(f["url"])["content"]).decode()
+        for repo, dirs in (("org-manifest", ["repos"]), ("org-policy", ["", "rulesets"])):
+            for d in dirs:
+                for f in gh.get(f"/repos/{org}/{repo}/contents/{d}"):
+                    if f["type"] == "file" and f["name"].endswith(".yaml"):
+                        files[f["path"]] = base64.b64decode(gh.get(f["url"])["content"]).decode()
         return cls(files)
 
 
@@ -285,7 +290,8 @@ class Scanner:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--org", required=True)
-    parser.add_argument("--config-dir", help="Read org-config from a local checkout")
+    parser.add_argument("--manifest-dir", help="Read org-manifest from a local checkout; needs --policy-dir")
+    parser.add_argument("--policy-dir", help="Read org-policy from a local checkout; needs --manifest-dir")
     parser.add_argument("--app-slug", help="Slug of the App posting results; required unless --dry-run")
     parser.add_argument("--dry-run", action="store_true", help="Print verdicts, post nothing")
     parser.add_argument("--run", metavar="REPO/RUN_ID", help="Evaluate only this deploy run, waiting or not; needs --dry-run")
@@ -297,7 +303,10 @@ def main():
         parser.error("--run needs --dry-run and --env")
 
     gh = GitHub()
-    config = Config.from_dir(args.config_dir) if args.config_dir else Config.from_github(gh, args.org)
+    if bool(args.manifest_dir) != bool(args.policy_dir):
+        parser.error("--manifest-dir and --policy-dir go together")
+    config = (Config.from_dirs(args.manifest_dir, args.policy_dir) if args.manifest_dir
+              else Config.from_github(gh, args.org))
     if config.change_management["source"] != "file":
         raise SystemExit(f"Unknown change source {config.change_management['source']}")
     changes = FileChanges(gh, args.org, config.change_management["repo"])

@@ -9,7 +9,7 @@ Runs every 10 minutes and on demand.
 
 ## Rules
 
-Rule sets live in `org-config/rulesets/`. Every repo gets the sets in `org-config/baseline.yaml` and adds its own in its manifest entry. All selected sets must pass.
+Rule sets live in `org-policy/rulesets/`. Every repo gets the sets in `org-policy/baseline.yaml` and adds its own in its `org-manifest` entry. All selected sets must pass.
 
 A deploy needs a change in `change-requests` that covers its version, environment and time. The `change_approved` rule in the repo's rule sets says whose approval counts. The requester and the deployer never count.
 
@@ -34,5 +34,5 @@ GITHUB_TOKEN=$(gh auth token) python -m gate --org Stefan-org-1 --dry-run --app-
   --run payments-web/<run id> --env prod
 ```
 
-- `--config-dir path/to/org-config` reads the rule sets and manifest from disk.
+- `--manifest-dir ../org-manifest --policy-dir ../org-policy` read them from disk instead of GitHub.
 - `--run` evaluates one deploy run, waiting or not.
