@@ -221,6 +221,8 @@ class Scanner:
             })
             comment = "\n".join([*(f"- {r}" for r in v.reasons), *(["All rule sets pass."] if not v.reasons else []),
                                  *(f"- {n}" for n in v.notes)])
+            # Links stay in the check run: the comment keeps their text to fit the limit.
+            comment = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", comment)
             comment = f"Details: {check['html_url']}\n{comment}"
             try:
                 self.gh.post(f"{base}/deployment_protection_rule",
