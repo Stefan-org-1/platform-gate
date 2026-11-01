@@ -170,10 +170,12 @@ class Scanner:
             "output": {"title": f"Policy {conclusion}", "summary": summary},
         })
 
-    def scan_deploy(self, repo: str, run: dict):
+    def scan_deploy(self, repo: str, run: dict, envs: list[str] | None = None):
+        """envs: evaluate as if waiting on these, instead of the run's pending deployments."""
         base = f"/repos/{self.org}/{repo}/actions/runs/{run['id']}"
         sha = run["head_sha"]
-        envs = [p["environment"]["name"] for p in self.gh.get(f"{base}/pending_deployments")]
+        if envs is None:
+            envs = [p["environment"]["name"] for p in self.gh.get(f"{base}/pending_deployments")]
         prs = self.gh.get(f"/repos/{self.org}/{repo}/commits/{sha}/pulls")
         other_runs = [r["conclusion"] or r["status"]
                       for r in self.gh.paginate(f"/repos/{self.org}/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
@@ -234,16 +236,25 @@ def main():
     parser.add_argument("--config-dir", help="Read org-config from a local checkout")
     parser.add_argument("--app-slug", help="Slug of the App posting results; required unless --dry-run")
     parser.add_argument("--dry-run", action="store_true", help="Print verdicts, post nothing")
+    parser.add_argument("--run", metavar="REPO/RUN_ID", help="Evaluate only this deploy run, waiting or not; needs --dry-run")
+    parser.add_argument("--env", help="Environment to evaluate --run against")
     args = parser.parse_args()
     if not args.dry_run and not args.app_slug:
         parser.error("--app-slug is required unless --dry-run")
+    if args.run and not (args.dry_run and args.env):
+        parser.error("--run needs --dry-run and --env")
 
     gh = GitHub()
     config = Config.from_dir(args.config_dir) if args.config_dir else Config.from_github(gh, args.org)
     if config.change_management["source"] != "file":
         raise SystemExit(f"Unknown change source {config.change_management['source']}")
     changes = FileChanges(gh, args.org, config.change_management["repo"])
-    Scanner(gh, args.org, config, changes, args.app_slug, args.dry_run).run()
+    scanner = Scanner(gh, args.org, config, changes, args.app_slug, args.dry_run)
+    if args.run:
+        repo, run_id = args.run.split("/")
+        scanner.scan_deploy(repo, gh.get(f"/repos/{args.org}/{repo}/actions/runs/{run_id}"), [args.env])
+    else:
+        scanner.run()
 
 
 if __name__ == "__main__":
